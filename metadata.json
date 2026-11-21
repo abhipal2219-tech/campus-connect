@@ -1,0 +1,6 @@
+{
+  "name": "CampusBot",
+  "description": "Minimalist monochrome campus companion with Google Sign-In, Student and Admin roles, Gemini AI Q&A assistant, class and exam reminders, campus directory, helpdesk tickets, and real-time campus alert notifications.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

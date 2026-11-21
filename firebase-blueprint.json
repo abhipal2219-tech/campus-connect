@@ -1,0 +1,418 @@
+{
+  "entities": {
+    "UserProfile": {
+      "title": "UserProfile",
+      "description": "Private profile and notification preferences for an authenticated CampusBot user.",
+      "type": "object",
+      "properties": {
+        "userId": {
+          "type": "string",
+          "description": "Firebase Auth UID matching the document ID."
+        },
+        "displayName": {
+          "type": "string",
+          "description": "User full name displayed in account header and helpdesk tickets."
+        },
+        "email": {
+          "type": "string",
+          "format": "email",
+          "description": "User Google account email address."
+        },
+        "department": {
+          "type": "string",
+          "description": "Academic major or campus department."
+        },
+        "notificationsEnabled": {
+          "type": "boolean",
+          "description": "Whether real-time urgent campus announcement notifications are enabled."
+        },
+        "reminderLeadMinutes": {
+          "type": "integer",
+          "description": "Default reminder lead time in minutes for upcoming classes and exams."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp written via FieldValue.serverTimestamp()."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp written via FieldValue.serverTimestamp()."
+        }
+      },
+      "required": [
+        "userId",
+        "displayName",
+        "email",
+        "department",
+        "notificationsEnabled",
+        "reminderLeadMinutes",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "AdminRecord": {
+      "title": "AdminRecord",
+      "description": "Server-enforced admin privilege record granting Campus Admin access.",
+      "type": "object",
+      "properties": {
+        "adminUid": {
+          "type": "string",
+          "description": "UID of the user granted Campus Admin privileges."
+        },
+        "grantedBy": {
+          "type": "string",
+          "description": "UID of the admin who created this grant."
+        },
+        "label": {
+          "type": "string",
+          "description": "Optional note or title for this campus administrator."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp written via FieldValue.serverTimestamp()."
+        }
+      },
+      "required": [
+        "adminUid",
+        "grantedBy",
+        "label",
+        "createdAt"
+      ]
+    },
+    "ScheduleItem": {
+      "title": "ScheduleItem",
+      "description": "A personal class session or exam deadline with reminder configuration.",
+      "type": "object",
+      "properties": {
+        "userId": {
+          "type": "string",
+          "description": "Owner Firebase Auth UID."
+        },
+        "itemType": {
+          "type": "string",
+          "enum": ["CLASS", "EXAM"],
+          "description": "Whether this item is a recurring weekly class or a dated exam/deadline."
+        },
+        "courseCode": {
+          "type": "string",
+          "description": "Short academic course code such as CS-201."
+        },
+        "title": {
+          "type": "string",
+          "description": "Class or exam title."
+        },
+        "dayOfWeek": {
+          "type": "integer",
+          "description": "Day of week 1 (Monday) through 7 (Sunday)."
+        },
+        "startTimeMinutes": {
+          "type": "integer",
+          "description": "Start time in minutes from midnight (0 to 1439)."
+        },
+        "endTimeMinutes": {
+          "type": "integer",
+          "description": "End time in minutes from midnight (0 to 1439)."
+        },
+        "examEpochMillis": {
+          "type": "integer",
+          "description": "UTC epoch milliseconds for exam date/time, or 0 for weekly classes."
+        },
+        "location": {
+          "type": "string",
+          "description": "Campus building and room number."
+        },
+        "instructor": {
+          "type": "string",
+          "description": "Professor or proctor name."
+        },
+        "reminderEnabled": {
+          "type": "boolean",
+          "description": "Whether a local Android notification reminder is scheduled."
+        },
+        "reminderLeadMinutes": {
+          "type": "integer",
+          "description": "Minutes before start time to trigger reminder notification."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp written via FieldValue.serverTimestamp()."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp written via FieldValue.serverTimestamp()."
+        }
+      },
+      "required": [
+        "userId",
+        "itemType",
+        "courseCode",
+        "title",
+        "dayOfWeek",
+        "startTimeMinutes",
+        "endTimeMinutes",
+        "examEpochMillis",
+        "location",
+        "instructor",
+        "reminderEnabled",
+        "reminderLeadMinutes",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "ChatMessage": {
+      "title": "ChatMessage",
+      "description": "A single message in the user's private CampusBot AI Q&A conversation.",
+      "type": "object",
+      "properties": {
+        "userId": {
+          "type": "string",
+          "description": "Owner Firebase Auth UID."
+        },
+        "sender": {
+          "type": "string",
+          "enum": ["USER", "ASSISTANT"],
+          "description": "Origin of the chat message."
+        },
+        "content": {
+          "type": "string",
+          "description": "Message text body."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp written via FieldValue.serverTimestamp()."
+        }
+      },
+      "required": [
+        "userId",
+        "sender",
+        "content",
+        "createdAt"
+      ]
+    },
+    "DirectoryOffice": {
+      "title": "DirectoryOffice",
+      "description": "Public campus office or service listing maintained by Campus Admins.",
+      "type": "object",
+      "properties": {
+        "visibility": {
+          "type": "string",
+          "enum": ["campus"],
+          "description": "Visibility scope required for campus-wide directory queries."
+        },
+        "name": {
+          "type": "string",
+          "description": "Official office or department name."
+        },
+        "category": {
+          "type": "string",
+          "enum": ["ACADEMIC", "IT_SUPPORT", "STUDENT_LIFE", "FACILITIES", "SAFETY"],
+          "description": "Directory category."
+        },
+        "building": {
+          "type": "string",
+          "description": "Campus building name."
+        },
+        "room": {
+          "type": "string",
+          "description": "Room or suite identifier."
+        },
+        "hours": {
+          "type": "string",
+          "description": "Operating hours."
+        },
+        "phone": {
+          "type": "string",
+          "description": "Public desk telephone number."
+        },
+        "email": {
+          "type": "string",
+          "description": "Public office support email."
+        },
+        "description": {
+          "type": "string",
+          "description": "Concise summary of services offered."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp written via FieldValue.serverTimestamp()."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp written via FieldValue.serverTimestamp()."
+        }
+      },
+      "required": [
+        "visibility",
+        "name",
+        "category",
+        "building",
+        "room",
+        "hours",
+        "phone",
+        "email",
+        "description",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "HelpdeskTicket": {
+      "title": "HelpdeskTicket",
+      "description": "A student helpdesk support request triaged by Campus Admins.",
+      "type": "object",
+      "properties": {
+        "userId": {
+          "type": "string",
+          "description": "Submitting student Firebase Auth UID."
+        },
+        "authorName": {
+          "type": "string",
+          "description": "Display name of submitting student."
+        },
+        "category": {
+          "type": "string",
+          "enum": ["IT_SUPPORT", "FACILITIES", "ACADEMIC", "ID_ACCESS", "OTHER"],
+          "description": "Ticket category."
+        },
+        "priority": {
+          "type": "string",
+          "enum": ["LOW", "MEDIUM", "HIGH"],
+          "description": "Ticket urgency priority."
+        },
+        "subject": {
+          "type": "string",
+          "description": "Short summary of the helpdesk issue."
+        },
+        "description": {
+          "type": "string",
+          "description": "Detailed description of the issue."
+        },
+        "location": {
+          "type": "string",
+          "description": "Relevant campus building or room."
+        },
+        "status": {
+          "type": "string",
+          "enum": ["OPEN", "IN_PROGRESS", "RESOLVED", "CLOSED"],
+          "description": "Workflow state; CLOSED is terminal for non-admin edits."
+        },
+        "adminResponse": {
+          "type": "string",
+          "description": "Official campus admin status note or resolution message."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp written via FieldValue.serverTimestamp()."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp written via FieldValue.serverTimestamp()."
+        }
+      },
+      "required": [
+        "userId",
+        "authorName",
+        "category",
+        "priority",
+        "subject",
+        "description",
+        "location",
+        "status",
+        "adminResponse",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "CampusAnnouncement": {
+      "title": "CampusAnnouncement",
+      "description": "Real-time campus announcement or urgent alert broadcast by Campus Admins.",
+      "type": "object",
+      "properties": {
+        "visibility": {
+          "type": "string",
+          "enum": ["campus"],
+          "description": "Visibility scope required for campus-wide real-time listeners."
+        },
+        "severity": {
+          "type": "string",
+          "enum": ["URGENT", "INFO"],
+          "description": "Alert severity determining high-priority push notification treatment."
+        },
+        "title": {
+          "type": "string",
+          "description": "Announcement headline."
+        },
+        "body": {
+          "type": "string",
+          "description": "Full announcement message."
+        },
+        "department": {
+          "type": "string",
+          "description": "Issuing campus department or office."
+        },
+        "authorId": {
+          "type": "string",
+          "description": "UID of the broadcasting Campus Admin."
+        },
+        "authorName": {
+          "type": "string",
+          "description": "Name of the broadcasting Campus Admin."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp written via FieldValue.serverTimestamp()."
+        }
+      },
+      "required": [
+        "visibility",
+        "severity",
+        "title",
+        "body",
+        "department",
+        "authorId",
+        "authorName",
+        "createdAt"
+      ]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": { "$ref": "#/entities/UserProfile" },
+      "description": "Private user profile and notification preferences."
+    },
+    "/admins/{adminUid}": {
+      "schema": { "$ref": "#/entities/AdminRecord" },
+      "description": "Trusted admin privilege registry."
+    },
+    "/users/{userId}/scheduleItems/{itemId}": {
+      "schema": { "$ref": "#/entities/ScheduleItem" },
+      "description": "User-scoped class schedules and exam deadline reminders."
+    },
+    "/users/{userId}/chatMessages/{messageId}": {
+      "schema": { "$ref": "#/entities/ChatMessage" },
+      "description": "User-scoped CampusBot AI Q&A conversation messages."
+    },
+    "/directory/{officeId}": {
+      "schema": { "$ref": "#/entities/DirectoryOffice" },
+      "description": "Campus directory offices maintained by Campus Admins."
+    },
+    "/tickets/{ticketId}": {
+      "schema": { "$ref": "#/entities/HelpdeskTicket" },
+      "description": "Student helpdesk tickets triaged by Campus Admins."
+    },
+    "/announcements/{announcementId}": {
+      "schema": { "$ref": "#/entities/CampusAnnouncement" },
+      "description": "Live campus announcements and urgent alerts broadcast by Campus Admins."
+    }
+  }
+}

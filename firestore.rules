@@ -1,0 +1,304 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Global safety net: deny all access by default
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // --- Primitive Helpers ---
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isValidTimestamp(ts) {
+      return ts is timestamp && ts <= request.time;
+    }
+
+    function isBootstrappedAdmin() {
+      return isSignedIn() &&
+             ('email' in request.auth.token) &&
+             ('email_verified' in request.auth.token) &&
+             request.auth.token.email == 'abhipal2219@gmail.com' &&
+             request.auth.token.email_verified == true;
+    }
+
+    function isAdmin() {
+      return isBootstrappedAdmin() ||
+             (isSignedIn() && exists(/databases/$(database)/documents/admins/$(request.auth.uid)));
+    }
+
+    // --- Validation Blueprints ---
+    function isValidUserProfile(data) {
+      return data.userId is string && data.userId.size() >= 1 && data.userId.size() <= 128 &&
+             data.displayName is string && data.displayName.size() >= 1 && data.displayName.size() <= 80 &&
+             data.email is string && data.email.size() <= 120 &&
+             data.department is string && data.department.size() <= 80 &&
+             data.notificationsEnabled is bool &&
+             data.reminderLeadMinutes is int && data.reminderLeadMinutes >= 5 && data.reminderLeadMinutes <= 1440;
+    }
+
+    function isValidAdminRecord(data, adminUid) {
+      return data.adminUid is string && data.adminUid == adminUid && data.adminUid.size() <= 128 &&
+             data.grantedBy is string && data.grantedBy.size() >= 1 && data.grantedBy.size() <= 128 &&
+             data.label is string && data.label.size() <= 80 &&
+             isValidTimestamp(data.createdAt);
+    }
+
+    function isValidScheduleItem(data, ownerUid) {
+      return data.userId is string && data.userId == ownerUid && data.userId.size() <= 128 &&
+             data.itemType is string && data.itemType in ['CLASS', 'EXAM'] &&
+             data.courseCode is string && data.courseCode.size() >= 1 && data.courseCode.size() <= 24 &&
+             data.title is string && data.title.size() >= 1 && data.title.size() <= 100 &&
+             data.dayOfWeek is int && data.dayOfWeek >= 1 && data.dayOfWeek <= 7 &&
+             data.startTimeMinutes is int && data.startTimeMinutes >= 0 && data.startTimeMinutes <= 1439 &&
+             data.endTimeMinutes is int && data.endTimeMinutes >= 0 && data.endTimeMinutes <= 1439 &&
+             data.examEpochMillis is int && data.examEpochMillis >= 0 && data.examEpochMillis <= 4102444800000 &&
+             data.location is string && data.location.size() <= 100 &&
+             data.instructor is string && data.instructor.size() <= 80 &&
+             data.reminderEnabled is bool &&
+             data.reminderLeadMinutes is int && data.reminderLeadMinutes >= 5 && data.reminderLeadMinutes <= 1440;
+    }
+
+    function isValidChatMessage(data, ownerUid) {
+      return data.userId is string && data.userId == ownerUid && data.userId.size() <= 128 &&
+             data.sender is string && data.sender in ['USER', 'ASSISTANT'] &&
+             data.content is string && data.content.size() >= 1 && data.content.size() <= 8000 &&
+             isValidTimestamp(data.createdAt);
+    }
+
+    function isValidDirectoryOffice(data) {
+      return data.visibility is string && data.visibility == 'campus' &&
+             data.name is string && data.name.size() >= 2 && data.name.size() <= 100 &&
+             data.category is string && data.category in ['ACADEMIC', 'IT_SUPPORT', 'STUDENT_LIFE', 'FACILITIES', 'SAFETY'] &&
+             data.building is string && data.building.size() >= 1 && data.building.size() <= 80 &&
+             data.room is string && data.room.size() <= 40 &&
+             data.hours is string && data.hours.size() >= 1 && data.hours.size() <= 100 &&
+             data.phone is string && data.phone.size() <= 32 &&
+             data.email is string && data.email.size() <= 100 &&
+             data.description is string && data.description.size() <= 400;
+    }
+
+    function isValidHelpdeskTicket(data) {
+      return data.userId is string && data.userId.size() >= 1 && data.userId.size() <= 128 &&
+             data.authorName is string && data.authorName.size() >= 1 && data.authorName.size() <= 80 &&
+             data.category is string && data.category in ['IT_SUPPORT', 'FACILITIES', 'ACADEMIC', 'ID_ACCESS', 'OTHER'] &&
+             data.priority is string && data.priority in ['LOW', 'MEDIUM', 'HIGH'] &&
+             data.subject is string && data.subject.size() >= 3 && data.subject.size() <= 120 &&
+             data.description is string && data.description.size() >= 5 && data.description.size() <= 1500 &&
+             data.location is string && data.location.size() <= 100 &&
+             data.status is string && data.status in ['OPEN', 'IN_PROGRESS', 'RESOLVED', 'CLOSED'] &&
+             data.adminResponse is string && data.adminResponse.size() <= 1500;
+    }
+
+    function isValidAnnouncement(data) {
+      return data.visibility is string && data.visibility == 'campus' &&
+             data.severity is string && data.severity in ['URGENT', 'INFO'] &&
+             data.title is string && data.title.size() >= 3 && data.title.size() <= 120 &&
+             data.body is string && data.body.size() >= 5 && data.body.size() <= 1500 &&
+             data.department is string && data.department.size() >= 1 && data.department.size() <= 60 &&
+             data.authorId is string && data.authorId.size() >= 1 && data.authorId.size() <= 128 &&
+             data.authorName is string && data.authorName.size() >= 1 && data.authorName.size() <= 80;
+    }
+
+    // --- Collection Rules ---
+
+    // 1. User Profiles (Strict PII isolation: owner or admin get only; no blanket list)
+    match /users/{userId} {
+      allow get: if isSignedIn() && isValidId(userId) && (request.auth.uid == userId || isAdmin());
+      allow list: if false;
+
+      allow create: if isSignedIn() &&
+                       isValidId(userId) &&
+                       request.auth.uid == userId &&
+                       incoming().userId == request.auth.uid &&
+                       incoming().keys().hasAll(['userId', 'displayName', 'email', 'department', 'notificationsEnabled', 'reminderLeadMinutes', 'createdAt', 'updatedAt']) &&
+                       incoming().keys().hasOnly(['userId', 'displayName', 'email', 'department', 'notificationsEnabled', 'reminderLeadMinutes', 'createdAt', 'updatedAt']) &&
+                       isValidUserProfile(incoming()) &&
+                       isValidTimestamp(incoming().createdAt) &&
+                       isValidTimestamp(incoming().updatedAt);
+
+      allow update: if isSignedIn() &&
+                       isValidId(userId) &&
+                       isValidUserProfile(incoming()) &&
+                       request.auth.uid == userId &&
+                       incoming().userId == existing().userId &&
+                       incoming().createdAt == existing().createdAt &&
+                       isValidTimestamp(incoming().updatedAt) &&
+                       incoming().diff(existing()).affectedKeys().hasOnly(['displayName', 'email', 'department', 'notificationsEnabled', 'reminderLeadMinutes', 'updatedAt']);
+
+      allow delete: if isSignedIn() && isValidId(userId) && (request.auth.uid == userId || isAdmin());
+
+      // 2. User-scoped Class Schedules & Exam Deadlines
+      match /scheduleItems/{itemId} {
+        allow get: if isSignedIn() && isValidId(userId) && isValidId(itemId) && request.auth.uid == userId;
+        allow list: if isSignedIn() && isValidId(userId) && request.auth.uid == userId;
+
+        allow create: if isSignedIn() &&
+                         isValidId(userId) &&
+                         isValidId(itemId) &&
+                         request.auth.uid == userId &&
+                         incoming().keys().hasAll(['userId', 'itemType', 'courseCode', 'title', 'dayOfWeek', 'startTimeMinutes', 'endTimeMinutes', 'examEpochMillis', 'location', 'instructor', 'reminderEnabled', 'reminderLeadMinutes', 'createdAt', 'updatedAt']) &&
+                         incoming().keys().hasOnly(['userId', 'itemType', 'courseCode', 'title', 'dayOfWeek', 'startTimeMinutes', 'endTimeMinutes', 'examEpochMillis', 'location', 'instructor', 'reminderEnabled', 'reminderLeadMinutes', 'createdAt', 'updatedAt']) &&
+                         isValidScheduleItem(incoming(), userId) &&
+                         isValidTimestamp(incoming().createdAt) &&
+                         isValidTimestamp(incoming().updatedAt);
+
+        allow update: if isSignedIn() &&
+                         isValidId(userId) &&
+                         isValidId(itemId) &&
+                         isValidScheduleItem(incoming(), userId) &&
+                         request.auth.uid == userId &&
+                         incoming().userId == existing().userId &&
+                         incoming().createdAt == existing().createdAt &&
+                         isValidTimestamp(incoming().updatedAt) &&
+                         incoming().diff(existing()).affectedKeys().hasOnly(['itemType', 'courseCode', 'title', 'dayOfWeek', 'startTimeMinutes', 'endTimeMinutes', 'examEpochMillis', 'location', 'instructor', 'reminderEnabled', 'reminderLeadMinutes', 'updatedAt']);
+
+        allow delete: if isSignedIn() && isValidId(userId) && isValidId(itemId) && request.auth.uid == userId;
+      }
+
+      // 3. User-scoped AI Q&A Chat Messages
+      match /chatMessages/{messageId} {
+        allow get: if isSignedIn() && isValidId(userId) && isValidId(messageId) && request.auth.uid == userId;
+        allow list: if isSignedIn() && isValidId(userId) && request.auth.uid == userId;
+
+        allow create: if isSignedIn() &&
+                         isValidId(userId) &&
+                         isValidId(messageId) &&
+                         request.auth.uid == userId &&
+                         incoming().keys().hasAll(['userId', 'sender', 'content', 'createdAt']) &&
+                         incoming().keys().hasOnly(['userId', 'sender', 'content', 'createdAt']) &&
+                         isValidChatMessage(incoming(), userId);
+
+        allow update: if false;
+
+        allow delete: if isSignedIn() && isValidId(userId) && isValidId(messageId) && request.auth.uid == userId;
+      }
+    }
+
+    // 4. Trusted Admin Registry (Self-check allowed on own UID; mutations strictly Admin-only)
+    match /admins/{adminUid} {
+      allow get: if isSignedIn() && isValidId(adminUid) && (request.auth.uid == adminUid || isAdmin());
+      allow list: if isBootstrappedAdmin();
+
+      allow create: if isSignedIn() &&
+                       isValidId(adminUid) &&
+                       incoming().keys().hasAll(['adminUid', 'grantedBy', 'label', 'createdAt']) &&
+                       incoming().keys().hasOnly(['adminUid', 'grantedBy', 'label', 'createdAt']) &&
+                       incoming().grantedBy == request.auth.uid &&
+                       isValidAdminRecord(incoming(), adminUid) &&
+                       isAdmin();
+
+      allow update: if false;
+      allow delete: if isSignedIn() && isValidId(adminUid) && isAdmin();
+    }
+
+    // 5. Campus Directory (Public campus offices; client queries filter visibility == 'campus')
+    match /directory/{officeId} {
+      allow get: if isSignedIn() && isValidId(officeId) && (existing().visibility == 'campus' || isAdmin());
+      allow list: if isSignedIn() && resource.data.visibility == 'campus';
+
+      allow create: if isSignedIn() &&
+                       isValidId(officeId) &&
+                       incoming().keys().hasAll(['visibility', 'name', 'category', 'building', 'room', 'hours', 'phone', 'email', 'description', 'createdAt', 'updatedAt']) &&
+                       incoming().keys().hasOnly(['visibility', 'name', 'category', 'building', 'room', 'hours', 'phone', 'email', 'description', 'createdAt', 'updatedAt']) &&
+                       isValidDirectoryOffice(incoming()) &&
+                       isValidTimestamp(incoming().createdAt) &&
+                       isValidTimestamp(incoming().updatedAt) &&
+                       isAdmin();
+
+      allow update: if isSignedIn() &&
+                       isValidId(officeId) &&
+                       isValidDirectoryOffice(incoming()) &&
+                       incoming().visibility == existing().visibility &&
+                       incoming().createdAt == existing().createdAt &&
+                       isValidTimestamp(incoming().updatedAt) &&
+                       incoming().diff(existing()).affectedKeys().hasOnly(['name', 'category', 'building', 'room', 'hours', 'phone', 'email', 'description', 'updatedAt']) &&
+                       isAdmin();
+
+      allow delete: if isSignedIn() && isValidId(officeId) && isAdmin();
+    }
+
+    // 6. Helpdesk Tickets (Owner isolation + Admin triage + Terminal state lock on CLOSED)
+    match /tickets/{ticketId} {
+      allow get: if isSignedIn() && isValidId(ticketId) && (existing().userId == request.auth.uid || isAdmin());
+      allow list: if isSignedIn() && (resource.data.userId == request.auth.uid || isAdmin());
+
+      allow create: if isSignedIn() &&
+                       isValidId(ticketId) &&
+                       incoming().userId == request.auth.uid &&
+                       incoming().status == 'OPEN' &&
+                       incoming().adminResponse == '' &&
+                       incoming().keys().hasAll(['userId', 'authorName', 'category', 'priority', 'subject', 'description', 'location', 'status', 'adminResponse', 'createdAt', 'updatedAt']) &&
+                       incoming().keys().hasOnly(['userId', 'authorName', 'category', 'priority', 'subject', 'description', 'location', 'status', 'adminResponse', 'createdAt', 'updatedAt']) &&
+                       isValidHelpdeskTicket(incoming()) &&
+                       isValidTimestamp(incoming().createdAt) &&
+                       isValidTimestamp(incoming().updatedAt);
+
+      allow update: if isSignedIn() &&
+                       isValidId(ticketId) &&
+                       isValidHelpdeskTicket(incoming()) &&
+                       incoming().userId == existing().userId &&
+                       incoming().authorName == existing().authorName &&
+                       incoming().createdAt == existing().createdAt &&
+                       isValidTimestamp(incoming().updatedAt) && (
+                         // Action 1: Admin triage & resolution (can also override terminal state)
+                         (isAdmin() &&
+                           incoming().diff(existing()).affectedKeys().hasOnly(['status', 'adminResponse', 'priority', 'updatedAt'])) ||
+                         // Action 2: Student closes own non-terminal ticket
+                         (existing().userId == request.auth.uid &&
+                           existing().status != 'CLOSED' &&
+                           incoming().status == 'CLOSED' &&
+                           incoming().diff(existing()).affectedKeys().hasOnly(['status', 'updatedAt'])) ||
+                         // Action 3: Student updates own still-OPEN ticket details
+                         (existing().userId == request.auth.uid &&
+                           existing().status == 'OPEN' &&
+                           incoming().diff(existing()).affectedKeys().hasOnly(['subject', 'description', 'location', 'priority', 'updatedAt']))
+                       );
+
+      allow delete: if isSignedIn() &&
+                       isValidId(ticketId) &&
+                       (isAdmin() || (existing().userId == request.auth.uid && existing().status == 'OPEN'));
+    }
+
+    // 7. Live Campus Announcements & Urgent Alerts (Client queries filter visibility == 'campus')
+    match /announcements/{announcementId} {
+      allow get: if isSignedIn() && isValidId(announcementId) && (existing().visibility == 'campus' || isAdmin());
+      allow list: if isSignedIn() && resource.data.visibility == 'campus';
+
+      allow create: if isSignedIn() &&
+                       isValidId(announcementId) &&
+                       incoming().authorId == request.auth.uid &&
+                       incoming().keys().hasAll(['visibility', 'severity', 'title', 'body', 'department', 'authorId', 'authorName', 'createdAt']) &&
+                       incoming().keys().hasOnly(['visibility', 'severity', 'title', 'body', 'department', 'authorId', 'authorName', 'createdAt']) &&
+                       isValidAnnouncement(incoming()) &&
+                       isValidTimestamp(incoming().createdAt) &&
+                       isAdmin();
+
+      allow update: if isSignedIn() &&
+                       isValidId(announcementId) &&
+                       isValidAnnouncement(incoming()) &&
+                       incoming().visibility == existing().visibility &&
+                       incoming().authorId == existing().authorId &&
+                       incoming().createdAt == existing().createdAt &&
+                       incoming().diff(existing()).affectedKeys().hasOnly(['severity', 'title', 'body', 'department']) &&
+                       isAdmin();
+
+      allow delete: if isSignedIn() && isValidId(announcementId) && isAdmin();
+    }
+  }
+}
