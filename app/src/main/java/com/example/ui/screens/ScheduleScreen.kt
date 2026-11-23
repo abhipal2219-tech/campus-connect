@@ -1,5 +1,9 @@
 package com.example.ui.screens
 
+import android.net.Uri
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.PickVisualMediaRequest
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -22,15 +26,22 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.AccessTime
 import androidx.compose.material.icons.outlined.CalendarMonth
+import androidx.compose.material.icons.outlined.CheckCircle
+import androidx.compose.material.icons.outlined.Close
 import androidx.compose.material.icons.outlined.DeleteOutline
+import androidx.compose.material.icons.outlined.DocumentScanner
+import androidx.compose.material.icons.outlined.Download
 import androidx.compose.material.icons.outlined.Edit
+import androidx.compose.material.icons.outlined.Image
 import androidx.compose.material.icons.outlined.LocationOn
 import androidx.compose.material.icons.outlined.NotificationsActive
 import androidx.compose.material.icons.outlined.NotificationsOff
+import androidx.compose.material.icons.outlined.PictureAsPdf
 import androidx.compose.material.icons.outlined.School
 import androidx.compose.material.icons.rounded.Add
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.FilterChipDefaults
@@ -40,6 +51,7 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
@@ -47,6 +59,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -77,6 +90,15 @@ private val StartHourOptions = listOf(8, 9, 10, 11, 13, 14, 15, 16, 18)
 fun ScheduleScreen(
     scheduleState: UiState<List<ScheduleItem>>,
     defaultLeadMinutes: Int,
+    iotSlotCount: Int,
+    isImportingTimetable: Boolean,
+    isExtractingSchedule: Boolean,
+    extractionError: String?,
+    lastImportSummary: String?,
+    onImportIot2B: () -> Unit,
+    onImportScheduleFile: (Uri) -> Unit,
+    onDismissExtractionError: () -> Unit,
+    onDismissImportSummary: () -> Unit,
     onSaveItem: (ScheduleItem, () -> Unit) -> Unit,
     onToggleReminder: (ScheduleItem) -> Unit,
     onDeleteItem: (ScheduleItem) -> Unit,
@@ -86,6 +108,39 @@ fun ScheduleScreen(
     var selectedDay by rememberSaveable { mutableIntStateOf(ScheduleFormatter.todayDayOfWeek()) }
     var editingItem by remember { mutableStateOf<ScheduleItem?>(null) }
     var showSheet by remember { mutableStateOf(false) }
+
+    // Zero-permission Android Photo Picker for timetable/exam screenshots & photos
+    val imagePickerLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.PickVisualMedia()
+    ) { uri ->
+        if (uri != null) {
+            onImportScheduleFile(uri)
+        }
+    }
+
+    // Zero-permission SAF Document Picker for PDF (and image) schedule files
+    val pdfPickerLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenDocument()
+    ) { uri ->
+        if (uri != null) {
+            onImportScheduleFile(uri)
+        }
+    }
+
+    // Automatically focus an imported day or the Exams tab right after auto-extraction completes
+    LaunchedEffect(lastImportSummary, scheduleState) {
+        if (lastImportSummary != null && scheduleState is UiState.Success) {
+            val items = scheduleState.data
+            val classes = items.filter { it.parsedType == ScheduleItemType.CLASS }
+            val exams = items.filter { it.parsedType == ScheduleItemType.EXAM }
+            if (classes.isEmpty() && exams.isNotEmpty()) {
+                selectedSegment = 1
+            } else if (classes.isNotEmpty() && classes.none { it.dayOfWeek == selectedDay }) {
+                selectedSegment = 0
+                selectedDay = classes.minOf { it.dayOfWeek }
+            }
+        }
+    }
 
     Box(modifier = Modifier.fillMaxSize()) {
         when (scheduleState) {
@@ -126,6 +181,25 @@ fun ScheduleScreen(
                         )
                     }
 
+                    // Auto-Extract Schedule from PDF or Image Card
+                    item {
+                        ScheduleDocumentScanCard(
+                            isExtracting = isExtractingSchedule,
+                            extractionError = extractionError,
+                            lastImportSummary = lastImportSummary,
+                            onPickImage = {
+                                imagePickerLauncher.launch(
+                                    PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
+                                )
+                            },
+                            onPickPdf = {
+                                pdfPickerLauncher.launch(arrayOf("application/pdf", "image/*"))
+                            },
+                            onDismissError = onDismissExtractionError,
+                            onDismissSummary = onDismissImportSummary
+                        )
+                    }
+
                     // Segmented Classes / Exams Switcher
                     item {
                         SegmentedMonochromeTabs(
@@ -159,6 +233,56 @@ fun ScheduleScreen(
                                         ),
                                         modifier = Modifier.testTag("day_chip_$day")
                                     )
+                                }
+                            }
+                        }
+
+                        if (iotSlotCount > 0) {
+                            item {
+                                MonochromeCard(containerColor = MaterialTheme.colorScheme.surfaceContainerLow) {
+                                    Row(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .padding(horizontal = 14.dp, vertical = 10.dp),
+                                        horizontalArrangement = Arrangement.SpaceBetween,
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        Column(modifier = Modifier.weight(1f)) {
+                                            Text(
+                                                text = "IoT 2B Official Timetable",
+                                                style = MaterialTheme.typography.titleSmall,
+                                                color = MaterialTheme.colorScheme.onSurface
+                                            )
+                                            Text(
+                                                text = "Load weekly classes & push reminders from campus JSON.",
+                                                style = MaterialTheme.typography.bodySmall,
+                                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                                            )
+                                        }
+                                        Spacer(modifier = Modifier.width(8.dp))
+                                        OutlinedButton(
+                                            onClick = onImportIot2B,
+                                            enabled = !isImportingTimetable,
+                                            shape = MaterialTheme.shapes.small,
+                                            contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
+                                            modifier = Modifier.testTag("import_iot2b_timetable_button")
+                                        ) {
+                                            if (isImportingTimetable) {
+                                                CircularProgressIndicator(
+                                                    modifier = Modifier.size(14.dp),
+                                                    strokeWidth = 2.dp
+                                                )
+                                            } else {
+                                                Icon(
+                                                    imageVector = Icons.Outlined.Download,
+                                                    contentDescription = "Import IoT 2B timetable",
+                                                    modifier = Modifier.size(16.dp)
+                                                )
+                                                Spacer(modifier = Modifier.width(6.dp))
+                                                Text("Import", style = MaterialTheme.typography.labelLarge)
+                                            }
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -273,6 +397,180 @@ fun ScheduleScreen(
                 onSaveItem(updated) { showSheet = false }
             }
         )
+    }
+}
+
+@Composable
+private fun ScheduleDocumentScanCard(
+    isExtracting: Boolean,
+    extractionError: String?,
+    lastImportSummary: String?,
+    onPickImage: () -> Unit,
+    onPickPdf: () -> Unit,
+    onDismissError: () -> Unit,
+    onDismissSummary: () -> Unit
+) {
+    MonochromeCard(containerColor = MaterialTheme.colorScheme.surface) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(14.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp)
+        ) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                Icon(
+                    imageVector = Icons.Outlined.DocumentScanner,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.onSurface,
+                    modifier = Modifier.size(20.dp)
+                )
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = "Auto-Import from Image or PDF",
+                        style = MaterialTheme.typography.titleSmall,
+                        color = MaterialTheme.colorScheme.onSurface
+                    )
+                    Text(
+                        text = "Upload your class timetable or exam routine to extract & add every entry automatically.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            }
+
+            if (isExtracting) {
+                Surface(
+                    shape = MaterialTheme.shapes.small,
+                    color = MaterialTheme.colorScheme.surfaceContainerLow,
+                    border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant)
+                ) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 12.dp, vertical = 10.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(10.dp)
+                    ) {
+                        CircularProgressIndicator(
+                            modifier = Modifier.size(18.dp),
+                            strokeWidth = 2.dp,
+                            color = MaterialTheme.colorScheme.primary
+                        )
+                        Text(
+                            text = "Reading document and adding classes & exams...",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurface
+                        )
+                    }
+                }
+            } else {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Button(
+                        onClick = onPickImage,
+                        shape = MaterialTheme.shapes.small,
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = MaterialTheme.colorScheme.primary,
+                            contentColor = MaterialTheme.colorScheme.onPrimary
+                        ),
+                        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 10.dp),
+                        modifier = Modifier
+                            .weight(1f)
+                            .height(48.dp)
+                            .testTag("upload_schedule_image_button")
+                    ) {
+                        Icon(
+                            imageVector = Icons.Outlined.Image,
+                            contentDescription = "Upload schedule image",
+                            modifier = Modifier.size(18.dp)
+                        )
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text("Upload Image", style = MaterialTheme.typography.labelLarge)
+                    }
+
+                    OutlinedButton(
+                        onClick = onPickPdf,
+                        shape = MaterialTheme.shapes.small,
+                        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 10.dp),
+                        modifier = Modifier
+                            .weight(1f)
+                            .height(48.dp)
+                            .testTag("upload_schedule_pdf_button")
+                    ) {
+                        Icon(
+                            imageVector = Icons.Outlined.PictureAsPdf,
+                            contentDescription = "Upload schedule PDF or file",
+                            modifier = Modifier.size(18.dp)
+                        )
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text("PDF / Files", style = MaterialTheme.typography.labelLarge)
+                    }
+                }
+            }
+
+            if (lastImportSummary != null) {
+                Surface(
+                    shape = MaterialTheme.shapes.small,
+                    color = MaterialTheme.colorScheme.surfaceContainerLow,
+                    border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant)
+                ) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(start = 12.dp, end = 4.dp, top = 6.dp, bottom = 6.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Outlined.CheckCircle,
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.onSurface,
+                                modifier = Modifier.size(16.dp)
+                            )
+                            Text(
+                                text = lastImportSummary,
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurface
+                            )
+                        }
+                        IconButton(
+                            onClick = onDismissSummary,
+                            modifier = Modifier.size(48.dp)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Outlined.Close,
+                                contentDescription = "Dismiss import summary",
+                                modifier = Modifier.size(16.dp)
+                            )
+                        }
+                    }
+                }
+            }
+
+            if (extractionError != null) {
+                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    MonochromeErrorCard(message = extractionError)
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.End
+                    ) {
+                        TextButton(onClick = onDismissError) {
+                            Text("Dismiss")
+                        }
+                    }
+                }
+            }
+        }
     }
 }
 

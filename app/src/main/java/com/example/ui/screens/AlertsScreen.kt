@@ -62,8 +62,10 @@ fun AlertsScreen(
     announcementsState: UiState<List<CampusAnnouncement>>,
     notificationsEnabled: Boolean,
     isAdmin: Boolean,
+    isGuestMode: Boolean = false,
     onOpenPreferences: () -> Unit,
-    onDeleteAnnouncement: (String) -> Unit
+    onDeleteAnnouncement: (String) -> Unit,
+    onRequestSignIn: () -> Unit = {}
 ) {
     val context = LocalContext.current
     var hasSystemPermission by remember {
@@ -193,30 +195,43 @@ fun AlertsScreen(
             )
         }
 
-        when (announcementsState) {
-            is UiState.Loading -> item { MonochromeLoadingState("Listening for campus alerts...") }
-            is UiState.Error -> item { MonochromeErrorCard(message = announcementsState.message) }
-            is UiState.Success -> {
-                val alerts = announcementsState.data
-                if (alerts.isEmpty()) {
-                    item {
-                        MonochromeEmptyState(
-                            icon = Icons.Outlined.Campaign,
-                            title = "All quiet on campus",
-                            subtitle = if (isAdmin) {
-                                "Publish an urgent alert or campus notice from the Admin Console to push it live to all students."
-                            } else {
-                                "Urgent campus alerts and official notices will appear here in real time."
-                            }
-                        )
-                    }
-                } else {
-                    items(alerts, key = { it.id }) { alert ->
-                        AnnouncementCard(
-                            announcement = alert,
-                            canDelete = isAdmin,
-                            onDelete = { onDeleteAnnouncement(alert.id) }
-                        )
+        if (isGuestMode) {
+            item {
+                MonochromeEmptyState(
+                    icon = Icons.Outlined.Campaign,
+                    title = "Sign in for live campus alerts",
+                    subtitle = "Local class and exam reminders work in Guest Mode. Sign in with Google to receive real-time urgent campus announcements from admins.",
+                    actionLabel = "Sign in with Google",
+                    onAction = onRequestSignIn,
+                    actionTag = "alerts_guest_sign_in_button"
+                )
+            }
+        } else {
+            when (announcementsState) {
+                is UiState.Loading -> item { MonochromeLoadingState("Listening for campus alerts...") }
+                is UiState.Error -> item { MonochromeErrorCard(message = announcementsState.message) }
+                is UiState.Success -> {
+                    val alerts = announcementsState.data
+                    if (alerts.isEmpty()) {
+                        item {
+                            MonochromeEmptyState(
+                                icon = Icons.Outlined.Campaign,
+                                title = "All quiet on campus",
+                                subtitle = if (isAdmin) {
+                                    "Publish an urgent alert or campus notice from the Admin Console to push it live to all students."
+                                } else {
+                                    "Urgent campus alerts and official notices will appear here in real time."
+                                }
+                            )
+                        }
+                    } else {
+                        items(alerts, key = { it.id }) { alert ->
+                            AnnouncementCard(
+                                announcement = alert,
+                                canDelete = isAdmin,
+                                onDelete = { onDeleteAnnouncement(alert.id) }
+                            )
+                        }
                     }
                 }
             }

@@ -29,10 +29,11 @@ import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -49,37 +50,21 @@ import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.unit.dp
 import androidx.credentials.CredentialManager
 import com.example.R
-import com.example.data.firebase.attemptAutoSignIn
 import com.example.data.firebase.onGoogleSignInClicked
 import com.example.ui.components.MonochromeBadge
 import com.example.ui.components.MonochromeErrorCard
 
 @Composable
 fun AuthScreen(
-    onAuthSuccess: () -> Unit
+    onAuthSuccess: () -> Unit,
+    onSkipSignIn: () -> Unit
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val credentialManager = remember(context) { CredentialManager.create(context) }
 
-    var isCheckingSession by remember { mutableStateOf(true) }
     var isSigningIn by remember { mutableStateOf(false) }
     var errorMessage by remember { mutableStateOf<String?>(null) }
-
-    LaunchedEffect(Unit) {
-        attemptAutoSignIn(
-            context = context,
-            credentialManager = credentialManager,
-            onAuthSuccess = {
-                isCheckingSession = false
-                onAuthSuccess()
-            },
-            onUnauthenticated = {
-                isCheckingSession = false
-            },
-            scope = scope
-        )
-    }
 
     Surface(
         modifier = Modifier.fillMaxSize(),
@@ -89,15 +74,31 @@ fun AuthScreen(
             modifier = Modifier
                 .fillMaxSize()
                 .safeDrawingPadding()
-                .padding(horizontal = 24.dp, vertical = 20.dp),
-            contentAlignment = Alignment.Center
+                .padding(horizontal = 24.dp, vertical = 16.dp)
         ) {
+            // Always-visible top-right Skip action
+            TextButton(
+                onClick = onSkipSignIn,
+                enabled = !isSigningIn,
+                modifier = Modifier
+                    .align(Alignment.TopEnd)
+                    .testTag("top_skip_sign_in_button")
+            ) {
+                Text(
+                    text = "Skip",
+                    style = MaterialTheme.typography.titleSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+
             Column(
                 modifier = Modifier
+                    .align(Alignment.Center)
                     .widthIn(max = 460.dp)
                     .fillMaxWidth()
-                    .verticalScroll(rememberScrollState()),
-                verticalArrangement = Arrangement.spacedBy(20.dp)
+                    .verticalScroll(rememberScrollState())
+                    .padding(top = 36.dp, bottom = 12.dp),
+                verticalArrangement = Arrangement.spacedBy(16.dp)
             ) {
                 Row(
                     verticalAlignment = Alignment.CenterVertically,
@@ -108,7 +109,7 @@ fun AuthScreen(
                         contentDescription = "CampusBot emblem",
                         contentScale = ContentScale.Crop,
                         modifier = Modifier
-                            .size(56.dp)
+                            .size(52.dp)
                             .clip(RoundedCornerShape(14.dp))
                     )
                     Column {
@@ -123,10 +124,87 @@ fun AuthScreen(
                 }
 
                 Text(
-                    text = "Your minimalist command center for classes, exam deadlines, campus offices, helpdesk tickets, and live alerts.",
-                    style = MaterialTheme.typography.bodyLarge,
+                    text = "Your minimalist command center for classes, exam deadlines, campus directory, helpdesk tickets, and live alerts.",
+                    style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
+
+                if (errorMessage != null) {
+                    MonochromeErrorCard(message = errorMessage!!)
+                }
+
+                // Primary Auth Actions placed immediately above the fold
+                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Button(
+                        onClick = {
+                            errorMessage = null
+                            isSigningIn = true
+                            onGoogleSignInClicked(
+                                context = context,
+                                credentialManager = credentialManager,
+                                onAuthSuccess = {
+                                    isSigningIn = false
+                                    onAuthSuccess()
+                                },
+                                onAuthError = { msg ->
+                                    isSigningIn = false
+                                    errorMessage = msg
+                                },
+                                scope = scope,
+                                onAuthCancelled = {
+                                    isSigningIn = false
+                                }
+                            )
+                        },
+                        enabled = !isSigningIn,
+                        shape = MaterialTheme.shapes.medium,
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = MaterialTheme.colorScheme.primary,
+                            contentColor = MaterialTheme.colorScheme.onPrimary
+                        ),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(52.dp)
+                            .testTag("google_sign_in_button")
+                    ) {
+                        if (isSigningIn) {
+                            CircularProgressIndicator(
+                                modifier = Modifier.size(20.dp),
+                                strokeWidth = 2.dp,
+                                color = MaterialTheme.colorScheme.onPrimary
+                            )
+                            Spacer(modifier = Modifier.width(12.dp))
+                            Text(
+                                text = "Signing in...",
+                                style = MaterialTheme.typography.titleSmall
+                            )
+                        } else {
+                            Text(
+                                text = "Sign in with Google",
+                                style = MaterialTheme.typography.titleMedium
+                            )
+                        }
+                    }
+
+                    OutlinedButton(
+                        onClick = onSkipSignIn,
+                        enabled = !isSigningIn,
+                        shape = MaterialTheme.shapes.medium,
+                        border = BorderStroke(1.5.dp, MaterialTheme.colorScheme.onBackground),
+                        colors = ButtonDefaults.outlinedButtonColors(
+                            contentColor = MaterialTheme.colorScheme.onBackground
+                        ),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(52.dp)
+                            .testTag("skip_sign_in_button")
+                    ) {
+                        Text(
+                            text = "Login as Guest (Skip Sign-In)",
+                            style = MaterialTheme.typography.titleMedium
+                        )
+                    }
+                }
 
                 Surface(
                     shape = MaterialTheme.shapes.medium,
@@ -136,95 +214,34 @@ fun AuthScreen(
                     Column(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .padding(18.dp),
-                        verticalArrangement = Arrangement.spacedBy(14.dp)
+                            .padding(14.dp),
+                        verticalArrangement = Arrangement.spacedBy(10.dp)
                     ) {
                         CapabilityRow(
                             icon = Icons.Outlined.AutoAwesome,
                             title = "AI Campus Q&A Assistant",
-                            subtitle = "Ask questions grounded in your live classes, exams, and campus notices."
+                            subtitle = "Instant answers from faculty, rooms, sections & schedules."
                         )
                         HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
                         CapabilityRow(
                             icon = Icons.Outlined.CalendarMonth,
                             title = "Class & Exam Reminders",
-                            subtitle = "Track weekly sessions and exam countdowns with scheduled alerts."
+                            subtitle = "Import IoT 2B timetable and schedule push reminders."
                         )
                         HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
                         CapabilityRow(
                             icon = Icons.Outlined.SupportAgent,
                             title = "Directory & Helpdesk Tickets",
-                            subtitle = "Reach campus offices directly or submit and track support requests."
+                            subtitle = "Browse rooms/faculty as guest or sign in for tickets."
                         )
                         HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
                         CapabilityRow(
                             icon = Icons.Outlined.NotificationsActive,
                             title = "Real-Time Campus Alerts",
-                            subtitle = "Instant high-priority notifications for urgent campus announcements."
+                            subtitle = "Sign in with Google for live admin announcements."
                         )
                     }
                 }
-
-                if (errorMessage != null) {
-                    MonochromeErrorCard(message = errorMessage!!)
-                }
-
-                Button(
-                    onClick = {
-                        errorMessage = null
-                        isSigningIn = true
-                        onGoogleSignInClicked(
-                            context = context,
-                            credentialManager = credentialManager,
-                            onAuthSuccess = {
-                                isSigningIn = false
-                                onAuthSuccess()
-                            },
-                            onAuthError = { msg ->
-                                isSigningIn = false
-                                errorMessage = msg
-                            },
-                            scope = scope,
-                            onAuthCancelled = {
-                                isSigningIn = false
-                            }
-                        )
-                    },
-                    enabled = !isSigningIn && !isCheckingSession,
-                    shape = MaterialTheme.shapes.medium,
-                    colors = ButtonDefaults.buttonColors(
-                        containerColor = MaterialTheme.colorScheme.primary,
-                        contentColor = MaterialTheme.colorScheme.onPrimary
-                    ),
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .height(54.dp)
-                        .testTag("google_sign_in_button")
-                ) {
-                    if (isSigningIn || isCheckingSession) {
-                        CircularProgressIndicator(
-                            modifier = Modifier.size(20.dp),
-                            strokeWidth = 2.dp,
-                            color = MaterialTheme.colorScheme.onPrimary
-                        )
-                        Spacer(modifier = Modifier.width(12.dp))
-                        Text(
-                            text = if (isCheckingSession) "Checking session..." else "Signing in...",
-                            style = MaterialTheme.typography.titleSmall
-                        )
-                    } else {
-                        Text(
-                            text = "Sign in with Google",
-                            style = MaterialTheme.typography.titleMedium
-                        )
-                    }
-                }
-
-                Text(
-                    text = "Student and Admin roles are automatically verified via Google Sign-In and secured with zero-trust cloud policies.",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
             }
         }
     }

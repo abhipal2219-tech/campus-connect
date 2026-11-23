@@ -127,39 +127,56 @@ class MainActivity : ComponentActivity() {
 @Composable
 private fun AppContent() {
     var currentUser by remember { mutableStateOf(Firebase.auth.currentUser) }
+    var isGuestMode by rememberSaveable { mutableStateOf(false) }
 
     DisposableEffect(Unit) {
         val listener = FirebaseAuth.AuthStateListener { auth ->
             currentUser = auth.currentUser
+            if (auth.currentUser != null) {
+                isGuestMode = false
+            }
         }
         Firebase.auth.addAuthStateListener(listener)
         onDispose { Firebase.auth.removeAuthStateListener(listener) }
     }
 
-    if (currentUser == null) {
+    if (currentUser == null && !isGuestMode) {
         AuthScreen(
             onAuthSuccess = {
+                isGuestMode = false
                 currentUser = Firebase.auth.currentUser
+            },
+            onSkipSignIn = {
+                isGuestMode = true
             }
         )
     } else {
-        val uid = currentUser!!.uid
-        key(uid) {
-            CampusBotShell(currentUserId = uid)
+        val uid = currentUser?.uid ?: "guest"
+        val guestActive = currentUser == null && isGuestMode
+        key(uid, guestActive) {
+            CampusBotShell(
+                currentUserId = uid,
+                isGuestMode = guestActive,
+                onRequestSignIn = { isGuestMode = false }
+            )
         }
     }
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun CampusBotShell(currentUserId: String) {
+private fun CampusBotShell(
+    currentUserId: String,
+    isGuestMode: Boolean,
+    onRequestSignIn: () -> Unit
+) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val credentialManager = remember(context) { CredentialManager.create(context) }
 
     val vm: CampusBotViewModel = viewModel(
-        key = currentUserId,
-        factory = CampusBotViewModel.factory(context)
+        key = "${currentUserId}_$isGuestMode",
+        factory = CampusBotViewModel.factory(context, isGuestMode = isGuestMode)
     )
 
     val userProfile by vm.userProfile.collectAsStateWithLifecycle()
@@ -176,6 +193,11 @@ private fun CampusBotShell(currentUserId: String) {
     val aiError by vm.aiError.collectAsStateWithLifecycle()
     val liveAlertBanner by vm.liveAlertBanner.collectAsStateWithLifecycle()
     val snackbarMessage by vm.snackbarMessage.collectAsStateWithLifecycle()
+    val knowledgeData by vm.knowledgeData.collectAsStateWithLifecycle()
+    val isImportingTimetable by vm.importingTimetable.collectAsStateWithLifecycle()
+    val isExtractingSchedule by vm.extractingSchedule.collectAsStateWithLifecycle()
+    val extractionError by vm.extractionError.collectAsStateWithLifecycle()
+    val lastImportSummary by vm.lastImportSummary.collectAsStateWithLifecycle()
 
     val tabs = remember(isAdmin) {
         if (isAdmin) CampusTab.entries else CampusTab.entries.filter { it != CampusTab.ADMIN }
@@ -240,7 +262,11 @@ private fun CampusBotShell(currentUserId: String) {
                                     horizontalArrangement = Arrangement.spacedBy(8.dp)
                                 ) {
                                     MonochromeBadge(
-                                        text = if (isAdmin) "ADMIN" else "STUDENT",
+                                        text = when {
+                                            isGuestMode -> "GUEST"
+                                            isAdmin -> "ADMIN"
+                                            else -> "STUDENT"
+                                        },
                                         inverted = isAdmin
                                     )
                                     Icon(
@@ -375,6 +401,7 @@ private fun CampusBotShell(currentUserId: String) {
                             when (selectedTab) {
                                 CampusTab.ASSISTANT -> AssistantScreen(
                                     chatState = chatMessagesState,
+                                    knowledgeData = knowledgeData,
                                     scheduleItems = scheduleItems,
                                     announcements = announcements,
                                     directoryCount = directoryCount,
@@ -393,6 +420,15 @@ private fun CampusBotShell(currentUserId: String) {
                                 CampusTab.SCHEDULE -> ScheduleScreen(
                                     scheduleState = scheduleState,
                                     defaultLeadMinutes = userProfile?.reminderLeadMinutes ?: 30,
+                                    iotSlotCount = knowledgeData.iot2BSlots.size,
+                                    isImportingTimetable = isImportingTimetable,
+                                    isExtractingSchedule = isExtractingSchedule,
+                                    extractionError = extractionError,
+                                    lastImportSummary = lastImportSummary,
+                                    onImportIot2B = vm::importIot2BTimetable,
+                                    onImportScheduleFile = vm::importScheduleFromUri,
+                                    onDismissExtractionError = vm::clearExtractionError,
+                                    onDismissImportSummary = vm::dismissImportSummary,
                                     onSaveItem = vm::saveScheduleItem,
                                     onToggleReminder = vm::toggleScheduleReminder,
                                     onDeleteItem = vm::deleteScheduleItem,
@@ -401,18 +437,23 @@ private fun CampusBotShell(currentUserId: String) {
 
                                 CampusTab.CAMPUS -> CampusScreen(
                                     initialSegment = campusInitialSegment,
+                                    isGuestMode = isGuestMode,
+                                    knowledgeData = knowledgeData,
                                     directoryState = directoryState,
                                     ticketsState = myTicketsState,
                                     onCreateTicket = vm::submitTicket,
-                                    onCloseOwnTicket = vm::closeOwnTicket
+                                    onCloseOwnTicket = vm::closeOwnTicket,
+                                    onRequestSignIn = onRequestSignIn
                                 )
 
                                 CampusTab.ALERTS -> AlertsScreen(
                                     announcementsState = announcementsState,
                                     notificationsEnabled = userProfile?.notificationsEnabled ?: true,
                                     isAdmin = isAdmin,
+                                    isGuestMode = isGuestMode,
                                     onOpenPreferences = { showAccountSheet = true },
-                                    onDeleteAnnouncement = vm::deleteAnnouncement
+                                    onDeleteAnnouncement = vm::deleteAnnouncement,
+                                    onRequestSignIn = onRequestSignIn
                                 )
 
                                 CampusTab.ADMIN -> AdminScreen(
@@ -439,6 +480,7 @@ private fun CampusBotShell(currentUserId: String) {
             uid = currentUserId,
             profile = userProfile,
             isAdmin = isAdmin,
+            isGuestMode = isGuestMode,
             onDismiss = { showAccountSheet = false },
             onSavePreferences = vm::updateProfilePreferences,
             onSignOut = {
@@ -446,7 +488,8 @@ private fun CampusBotShell(currentUserId: String) {
                     credentialManager = credentialManager,
                     scope = scope
                 )
-            }
+            },
+            onSignInWithGoogle = onRequestSignIn
         )
     }
 }

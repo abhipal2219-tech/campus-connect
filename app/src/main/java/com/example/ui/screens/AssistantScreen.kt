@@ -53,21 +53,24 @@ import com.example.data.model.ScheduleFormatter
 import com.example.data.model.ScheduleItem
 import com.example.data.model.ScheduleItemType
 import com.example.data.model.UiState
+import com.example.data.repository.CampusKnowledgeData
+import com.example.ui.components.FormattedAssistantText
 import com.example.ui.components.MonochromeBadge
 import com.example.ui.components.MonochromeCard
 import com.example.ui.components.MonochromeErrorCard
 import com.example.ui.components.MonochromeLoadingState
 
 private val StarterPrompts = listOf(
-    "What is my next class or exam?",
-    "Summarize active campus alerts",
-    "Where is the IT Helpdesk and what are their hours?",
-    "Build a study plan for my upcoming exams"
+    "What is IoT 2B's Monday schedule and room?",
+    "Where is Buddha Auditorium and the Medical Room?",
+    "Who is the class teacher and mentors for Section A?",
+    "Which room is Dr. Srima Nandi or Dr. Arabinda Chakraborty in?"
 )
 
 @Composable
 fun AssistantScreen(
     chatState: UiState<List<ChatMessage>>,
+    knowledgeData: CampusKnowledgeData,
     scheduleItems: List<ScheduleItem>,
     announcements: List<CampusAnnouncement>,
     directoryCount: Int,
@@ -82,8 +85,6 @@ fun AssistantScreen(
     var inputText by rememberSaveable { mutableStateOf("") }
     val listState = rememberLazyListState()
 
-    val classCount = scheduleItems.count { it.parsedType == ScheduleItemType.CLASS }
-    val examCount = scheduleItems.count { it.parsedType == ScheduleItemType.EXAM }
     val messages = (chatState as? UiState.Success)?.data.orEmpty()
 
     LaunchedEffect(messages.size, streamingText) {
@@ -107,7 +108,7 @@ fun AssistantScreen(
             horizontalArrangement = Arrangement.SpaceBetween
         ) {
             MonochromeBadge(
-                text = "SYNCED · $classCount CLASSES · $examCount EXAMS · ${announcements.size} ALERTS"
+                text = "KB · ${knowledgeData.faculty.size} FACULTY · ${knowledgeData.rooms.size} ROOMS · ${knowledgeData.sections.size} SEC · ${announcements.size} ALERTS"
             )
             if (messages.isNotEmpty()) {
                 IconButton(
@@ -142,6 +143,10 @@ fun AssistantScreen(
                 is UiState.Success -> {
                     if (messages.isEmpty() && streamingText == null) {
                         AssistantEmptyCanvas(
+                            facultyCount = knowledgeData.faculty.size,
+                            roomCount = knowledgeData.rooms.size,
+                            sectionCount = knowledgeData.sections.size,
+                            iotSlotCount = knowledgeData.iot2BSlots.size,
                             directoryCount = directoryCount,
                             onPromptSelected = { prompt ->
                                 onDismissError()
@@ -181,7 +186,10 @@ fun AssistantScreen(
             ) {
                 items(StarterPrompts.take(3)) { suggestion ->
                     Surface(
-                        onClick = { onSendPrompt(suggestion) },
+                        onClick = {
+                            onDismissError()
+                            onSendPrompt(suggestion)
+                        },
                         shape = RoundedCornerShape(20.dp),
                         color = MaterialTheme.colorScheme.surface,
                         border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant)
@@ -217,7 +225,7 @@ fun AssistantScreen(
                         .testTag("assistant_prompt_input"),
                     placeholder = {
                         Text(
-                            text = "Ask CampusBot about classes, exams, offices...",
+                            text = "Ask about faculty, rooms, sections, IoT 2B schedule...",
                             style = MaterialTheme.typography.bodyMedium
                         )
                     },
@@ -286,6 +294,10 @@ fun AssistantScreen(
 
 @Composable
 private fun AssistantEmptyCanvas(
+    facultyCount: Int,
+    roomCount: Int,
+    sectionCount: Int,
+    iotSlotCount: Int,
     directoryCount: Int,
     onPromptSelected: (String) -> Unit,
     onNavigateToTickets: () -> Unit
@@ -320,7 +332,7 @@ private fun AssistantEmptyCanvas(
                         )
                     }
                     Text(
-                        text = "Grounded in your personal class timetable, exam deadlines, live campus announcements, and $directoryCount campus directory offices.",
+                        text = "Grounded in $facultyCount faculty profiles, $roomCount campus rooms across B1–B3, $sectionCount sections & mentors, $iotSlotCount IoT 2B timetable slots, plus your personal schedule, live alerts, and $directoryCount admin offices.",
                         style = MaterialTheme.typography.bodyMedium,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
@@ -452,15 +464,18 @@ private fun ChatBubbleItem(message: ChatMessage) {
                         }
                     )
                 }
-                Text(
-                    text = message.content,
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = if (isUser) {
-                        MaterialTheme.colorScheme.onPrimary
-                    } else {
-                        MaterialTheme.colorScheme.onSurface
-                    }
-                )
+                if (isUser) {
+                    Text(
+                        text = message.content,
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onPrimary
+                    )
+                } else {
+                    FormattedAssistantText(
+                        rawText = message.content,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                }
             }
         }
     }
@@ -496,11 +511,18 @@ private fun StreamingAssistantBubble(
                     )
                 }
             }
-            Text(
-                text = text.ifBlank { "Analyzing your schedule and campus notices..." },
-                style = MaterialTheme.typography.bodyMedium,
-                color = MaterialTheme.colorScheme.onSurface
-            )
+            if (text.isBlank()) {
+                Text(
+                    text = "Looking up campus records and your schedule...",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            } else {
+                FormattedAssistantText(
+                    rawText = text,
+                    modifier = Modifier.fillMaxWidth()
+                )
+            }
         }
     }
 }

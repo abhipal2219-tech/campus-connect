@@ -47,9 +47,11 @@ fun AccountPreferencesSheet(
     uid: String,
     profile: UserProfile?,
     isAdmin: Boolean,
+    isGuestMode: Boolean = false,
     onDismiss: () -> Unit,
     onSavePreferences: (String, String, Boolean, Int, () -> Unit) -> Unit,
-    onSignOut: () -> Unit
+    onSignOut: () -> Unit,
+    onSignInWithGoogle: () -> Unit = {}
 ) {
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     var displayName by remember(profile?.displayName) {
@@ -84,7 +86,11 @@ fun AccountPreferencesSheet(
             ) {
                 Text("Account & Alerts", style = MaterialTheme.typography.headlineSmall)
                 MonochromeBadge(
-                    text = if (isAdmin) "CAMPUS ADMIN" else "STUDENT",
+                    text = when {
+                        isGuestMode -> "GUEST"
+                        isAdmin -> "CAMPUS ADMIN"
+                        else -> "STUDENT"
+                    },
                     inverted = isAdmin
                 )
             }
@@ -101,11 +107,19 @@ fun AccountPreferencesSheet(
                     verticalArrangement = Arrangement.spacedBy(4.dp)
                 ) {
                     Text(
-                        text = profile?.email?.ifBlank { "Google Account" } ?: "Google Account",
+                        text = if (isGuestMode) {
+                            "Guest Mode (Local Session)"
+                        } else {
+                            profile?.email?.ifBlank { "Google Account" } ?: "Google Account"
+                        },
                         style = MaterialTheme.typography.titleSmall
                     )
                     Text(
-                        text = "UID: $uid",
+                        text = if (isGuestMode) {
+                            "AI assistant, campus JSON directory, and local reminders are active. Sign in with Google to sync across devices."
+                        } else {
+                            "UID: $uid"
+                        },
                         style = MaterialTheme.typography.labelSmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
@@ -177,21 +191,40 @@ fun AccountPreferencesSheet(
 
             HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
 
-            OutlinedButton(
-                onClick = {
-                    onDismiss()
-                    onSignOut()
-                },
-                colors = ButtonDefaults.outlinedButtonColors(
-                    contentColor = MaterialTheme.colorScheme.error
-                ),
-                border = BorderStroke(1.dp, MaterialTheme.colorScheme.error),
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(48.dp)
-                    .testTag("sign_out_button")
-            ) {
-                Text("Sign Out")
+            if (isGuestMode) {
+                Button(
+                    onClick = {
+                        onDismiss()
+                        onSignInWithGoogle()
+                    },
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = MaterialTheme.colorScheme.primary,
+                        contentColor = MaterialTheme.colorScheme.onPrimary
+                    ),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(48.dp)
+                        .testTag("guest_sign_in_button")
+                ) {
+                    Text("Sign in with Google")
+                }
+            } else {
+                OutlinedButton(
+                    onClick = {
+                        onDismiss()
+                        onSignOut()
+                    },
+                    colors = ButtonDefaults.outlinedButtonColors(
+                        contentColor = MaterialTheme.colorScheme.error
+                    ),
+                    border = BorderStroke(1.dp, MaterialTheme.colorScheme.error),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(48.dp)
+                        .testTag("sign_out_button")
+                ) {
+                    Text("Sign Out")
+                }
             }
 
             Spacer(modifier = Modifier.height(16.dp))
