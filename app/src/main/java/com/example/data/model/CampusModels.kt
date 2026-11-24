@@ -9,6 +9,8 @@ import java.text.SimpleDateFormat
 import java.util.Calendar
 import java.util.Date
 import java.util.Locale
+import org.json.JSONArray
+import org.json.JSONObject
 
 sealed interface UiState<out T> {
     data object Loading : UiState<Nothing>
@@ -95,6 +97,17 @@ enum class ChatSender {
     }
 }
 
+enum class PublishedScheduleKind(val label: String) {
+    CLASS("Class Timetable"),
+    EXAM("Exam Routine"),
+    BOTH("Class & Exam");
+
+    companion object {
+        fun fromRaw(raw: String): PublishedScheduleKind =
+            entries.firstOrNull { it.name == raw } ?: CLASS
+    }
+}
+
 @Keep
 @IgnoreExtraProperties
 data class UserProfile(
@@ -102,12 +115,42 @@ data class UserProfile(
     val userId: String = "",
     val displayName: String = "",
     val email: String = "",
+    val program: String = "",
     val department: String = "",
+    val semester: Int = 0,
+    val section: String = "",
+    val rollNumber: String = "",
+    val enrollmentNumber: String = "",
+    val profileCompleted: Boolean = false,
     val notificationsEnabled: Boolean = true,
     val reminderLeadMinutes: Int = 30,
     @ServerTimestamp val createdAt: Timestamp? = null,
     @ServerTimestamp val updatedAt: Timestamp? = null
-)
+) {
+    val academicYear: Int
+        get() = AcademicCatalog.yearFromSemester(semester)
+
+    val needsAcademicOnboarding: Boolean
+        get() = !profileCompleted ||
+            program.isBlank() ||
+            department.isBlank() ||
+            semester <= 0 ||
+            section.isBlank() ||
+            rollNumber.isBlank() ||
+            enrollmentNumber.isBlank()
+
+    fun toAcademicScope(): StudentAcademicScope? {
+        if (department.isBlank() || semester <= 0 || section.isBlank()) return null
+        return StudentAcademicScope(
+            program = program,
+            department = department,
+            semester = semester,
+            section = section,
+            rollNumber = rollNumber,
+            enrollmentNumber = enrollmentNumber
+        )
+    }
+}
 
 @Keep
 @IgnoreExtraProperties
@@ -207,6 +250,103 @@ data class CampusAnnouncement(
     @ServerTimestamp val createdAt: Timestamp? = null
 ) {
     val parsedSeverity: AnnouncementSeverity get() = AnnouncementSeverity.fromRaw(severity)
+}
+
+@Keep
+@IgnoreExtraProperties
+data class PublishedSchedule(
+    @DocumentId val id: String = "",
+    val visibility: String = "campus",
+    val program: String = "",
+    val department: String = "",
+    val academicYear: Int = 1,
+    val semester: Int = 0,
+    val section: String = "",
+    val scheduleKind: String = PublishedScheduleKind.CLASS.name,
+    val title: String = "",
+    val entriesJson: String = "[]",
+    val entryCount: Int = 0,
+    val publishedByUid: String = "",
+    val publishedByName: String = "",
+    @ServerTimestamp val createdAt: Timestamp? = null,
+    @ServerTimestamp val updatedAt: Timestamp? = null
+) {
+    val parsedKind: PublishedScheduleKind get() = PublishedScheduleKind.fromRaw(scheduleKind)
+
+    val batchLabel: String
+        get() {
+            val parts = buildList {
+                if (program.isNotBlank()) add(program)
+                if (department.isNotBlank()) add(department)
+                add("Year $academicYear")
+                if (semester > 0) add("Sem $semester")
+                if (section.isNotBlank()) add("Sec ${AcademicCatalog.normalizeSection(section)}")
+            }
+            return parts.joinToString(" · ")
+        }
+
+    fun matchesScope(scope: StudentAcademicScope?): Boolean {
+        if (scope == null || !scope.isConfigured) return false
+        val deptMatch = department.trim().equals(scope.department.trim(), ignoreCase = true)
+        val programMatch = program.isBlank() || scope.program.isBlank() ||
+            program.trim().equals(scope.program.trim(), ignoreCase = true)
+        val yearMatch = academicYear == scope.academicYear
+        val semMatch = semester <= 0 || semester == scope.semester
+        val secMatch = AcademicCatalog.normalizeSection(section) == AcademicCatalog.normalizeSection(scope.section)
+        return deptMatch && programMatch && yearMatch && semMatch && secMatch
+    }
+}
+
+object PublishedScheduleCodec {
+    fun encode(items: List<ScheduleItem>): String {
+        val arr = JSONArray()
+        items.take(150).forEach { item ->
+            val obj = JSONObject()
+            obj.put("itemType", item.parsedType.name)
+            obj.put("courseCode", item.courseCode.trim().ifBlank { "CLS" }.take(24))
+            obj.put("title", item.title.trim().ifBlank { "Session" }.take(100))
+            obj.put("dayOfWeek", item.dayOfWeek.coerceIn(1, 7))
+            obj.put("startTimeMinutes", item.startTimeMinutes.coerceIn(0, 1439))
+            obj.put("endTimeMinutes", item.endTimeMinutes.coerceIn(0, 1439))
+            obj.put("examEpochMillis", item.examEpochMillis.coerceAtLeast(0L))
+            obj.put("location", item.location.trim().take(100))
+            obj.put("instructor", item.instructor.trim().take(80))
+            arr.put(obj)
+        }
+        return arr.toString()
+    }
+
+    fun decode(entriesJson: String, defaultLeadMinutes: Int = 30): List<ScheduleItem> {
+        if (entriesJson.isBlank()) return emptyList()
+        return runCatching {
+            val arr = JSONArray(entriesJson)
+            buildList {
+                for (i in 0 until arr.length()) {
+                    val obj = arr.optJSONObject(i) ?: continue
+                    val rawType = obj.optString("itemType", ScheduleItemType.CLASS.name)
+                    val title = obj.optString("title", "").trim().take(100)
+                    if (title.isBlank()) continue
+                    val startMin = obj.optInt("startTimeMinutes", 540).coerceIn(0, 1439)
+                    val endMin = obj.optInt("endTimeMinutes", (startMin + 60).coerceAtMost(1439)).coerceIn(0, 1439)
+                    add(
+                        ScheduleItem(
+                            itemType = ScheduleItemType.fromRaw(rawType).name,
+                            courseCode = obj.optString("courseCode", "CLS").trim().ifBlank { "CLS" }.take(24),
+                            title = title,
+                            dayOfWeek = obj.optInt("dayOfWeek", 1).coerceIn(1, 7),
+                            startTimeMinutes = startMin,
+                            endTimeMinutes = endMin,
+                            examEpochMillis = obj.optLong("examEpochMillis", 0L).coerceAtLeast(0L),
+                            location = obj.optString("location", "").trim().take(100),
+                            instructor = obj.optString("instructor", "").trim().take(80),
+                            reminderEnabled = true,
+                            reminderLeadMinutes = defaultLeadMinutes.coerceIn(5, 1440)
+                        )
+                    )
+                }
+            }
+        }.getOrElse { emptyList() }
+    }
 }
 
 object ScheduleFormatter {

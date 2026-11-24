@@ -4,6 +4,7 @@ import android.content.Context
 import com.example.R
 import com.example.data.firebase.OperationType
 import com.example.data.firebase.handleFirestoreError
+import com.example.data.model.AcademicCatalog
 import com.example.data.model.AdminRecord
 import com.example.data.model.AnnouncementSeverity
 import com.example.data.model.CampusAnnouncement
@@ -12,6 +13,9 @@ import com.example.data.model.ChatSender
 import com.example.data.model.DirectoryCategory
 import com.example.data.model.DirectoryOffice
 import com.example.data.model.HelpdeskTicket
+import com.example.data.model.PublishedSchedule
+import com.example.data.model.PublishedScheduleCodec
+import com.example.data.model.PublishedScheduleKind
 import com.example.data.model.ScheduleItem
 import com.example.data.model.ScheduleItemType
 import com.example.data.model.TicketCategory
@@ -85,7 +89,13 @@ class CampusRepository(private val db: FirebaseFirestore) {
                     "userId" to uid,
                     "displayName" to safeName,
                     "email" to safeEmail,
-                    "department" to "General Studies",
+                    "program" to "",
+                    "department" to "",
+                    "semester" to 0,
+                    "section" to "",
+                    "rollNumber" to "",
+                    "enrollmentNumber" to "",
+                    "profileCompleted" to false,
                     "notificationsEnabled" to true,
                     "reminderLeadMinutes" to 30,
                     "createdAt" to FieldValue.serverTimestamp(),
@@ -98,7 +108,13 @@ class CampusRepository(private val db: FirebaseFirestore) {
                         userId = uid,
                         displayName = safeName,
                         email = safeEmail,
-                        department = "General Studies",
+                        program = "",
+                        department = "",
+                        semester = 0,
+                        section = "",
+                        rollNumber = "",
+                        enrollmentNumber = "",
+                        profileCompleted = false,
                         notificationsEnabled = true,
                         reminderLeadMinutes = 30
                     )
@@ -130,9 +146,85 @@ class CampusRepository(private val db: FirebaseFirestore) {
         )
     }
 
+    suspend fun saveAcademicOnboarding(
+        program: String,
+        department: String,
+        semester: Int,
+        section: String,
+        rollNumber: String,
+        enrollmentNumber: String
+    ): Result<Unit> {
+        val uid = auth.currentUser?.uid ?: return Result.failure(IllegalStateException("Not signed in"))
+        val path = "users/$uid"
+        return try {
+            val cleanProgram = program.trim().take(40)
+            val cleanDept = department.trim().take(80)
+            val safeSem = semester.coerceIn(1, 10)
+            val cleanSec = section.trim().uppercase().take(24)
+            val cleanRoll = rollNumber.trim().take(40)
+            val cleanEnroll = enrollmentNumber.trim().take(60)
+            require(cleanProgram.isNotEmpty() && cleanDept.isNotEmpty()) { "Please select your program and department." }
+            require(cleanSec.isNotEmpty()) { "Please enter your section." }
+            require(cleanRoll.isNotEmpty() && cleanEnroll.isNotEmpty()) { "Roll number and enrollment number are required." }
+
+            // Ensure base profile exists first in case the first snapshot hasn't completed
+            val docRef = db.collection("users").document(uid)
+            val snap = docRef.get().await()
+            if (!snap.exists()) {
+                val user = auth.currentUser
+                val safeName = (user?.displayName?.takeIf { it.isNotBlank() }
+                    ?: user?.email?.substringBefore("@")
+                    ?: "Campus Student").take(80)
+                val safeEmail = (user?.email ?: "").take(120)
+                docRef.set(
+                    mapOf(
+                        "userId" to uid,
+                        "displayName" to safeName,
+                        "email" to safeEmail,
+                        "program" to cleanProgram,
+                        "department" to cleanDept,
+                        "semester" to safeSem,
+                        "section" to cleanSec,
+                        "rollNumber" to cleanRoll,
+                        "enrollmentNumber" to cleanEnroll,
+                        "profileCompleted" to true,
+                        "notificationsEnabled" to true,
+                        "reminderLeadMinutes" to 30,
+                        "createdAt" to FieldValue.serverTimestamp(),
+                        "updatedAt" to FieldValue.serverTimestamp()
+                    )
+                ).await()
+            } else {
+                docRef.update(
+                    mapOf(
+                        "program" to cleanProgram,
+                        "department" to cleanDept,
+                        "semester" to safeSem,
+                        "section" to cleanSec,
+                        "rollNumber" to cleanRoll,
+                        "enrollmentNumber" to cleanEnroll,
+                        "profileCompleted" to true,
+                        "updatedAt" to FieldValue.serverTimestamp()
+                    )
+                ).await()
+            }
+            Result.success(Unit)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.UPDATE, path)
+            Result.failure(e)
+        }
+    }
+
     suspend fun updateUserProfile(
         displayName: String,
+        program: String,
         department: String,
+        semester: Int,
+        section: String,
+        rollNumber: String,
+        enrollmentNumber: String,
         notificationsEnabled: Boolean,
         reminderLeadMinutes: Int
     ): Result<Unit> {
@@ -141,12 +233,30 @@ class CampusRepository(private val db: FirebaseFirestore) {
         return try {
             val cleanName = displayName.trim().take(80)
             require(cleanName.isNotEmpty()) { "Display name cannot be empty." }
+            val cleanProgram = program.trim().take(40)
             val cleanDept = department.trim().take(80)
+            val safeSem = semester.coerceIn(0, 10)
+            val cleanSec = section.trim().uppercase().take(24)
+            val cleanRoll = rollNumber.trim().take(40)
+            val cleanEnroll = enrollmentNumber.trim().take(60)
             val safeLead = reminderLeadMinutes.coerceIn(5, 1440)
+            val completed = cleanProgram.isNotEmpty() &&
+                cleanDept.isNotEmpty() &&
+                safeSem > 0 &&
+                cleanSec.isNotEmpty() &&
+                cleanRoll.isNotEmpty() &&
+                cleanEnroll.isNotEmpty()
+
             db.collection("users").document(uid).update(
                 mapOf(
                     "displayName" to cleanName,
+                    "program" to cleanProgram,
                     "department" to cleanDept,
+                    "semester" to safeSem,
+                    "section" to cleanSec,
+                    "rollNumber" to cleanRoll,
+                    "enrollmentNumber" to cleanEnroll,
+                    "profileCompleted" to completed,
                     "notificationsEnabled" to notificationsEnabled,
                     "reminderLeadMinutes" to safeLead,
                     "updatedAt" to FieldValue.serverTimestamp()
@@ -772,6 +882,131 @@ class CampusRepository(private val db: FirebaseFirestore) {
         return try {
             requireUserId()
             db.collection("announcements").document(announcementId).delete().await()
+            Result.success(Unit)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.DELETE, path)
+            Result.failure(e)
+        }
+    }
+
+    // --- Admin-Published Batch Schedules (Branch / Year / Section) ---
+
+    fun observePublishedSchedules(): Flow<List<PublishedSchedule>> = flow {
+        val uid = requireUserId()
+        val path = "publishedSchedules"
+        emitAll(
+            db.collection("publishedSchedules")
+                .whereEqualTo("visibility", "campus")
+                .snapshots()
+                .map { snap ->
+                    snap.toObjects(
+                        PublishedSchedule::class.java,
+                        DocumentSnapshot.ServerTimestampBehavior.ESTIMATE
+                    ).sortedByDescending { it.updatedAt?.toDate()?.time ?: it.createdAt?.toDate()?.time ?: 0L }
+                }
+                .catch { error -> handleFlowError(error, OperationType.LIST, path, uid) }
+        )
+    }
+
+    suspend fun publishBatchSchedule(
+        program: String,
+        department: String,
+        academicYear: Int,
+        semester: Int,
+        section: String,
+        kind: PublishedScheduleKind,
+        title: String,
+        entries: List<ScheduleItem>,
+        publisherName: String
+    ): Result<String> {
+        var path = "publishedSchedules"
+        return try {
+            val uid = requireUserId()
+            val cleanProgram = program.trim().take(40)
+            val cleanDept = department.trim().take(80)
+            val safeYear = academicYear.coerceIn(1, 5)
+            val safeSem = semester.coerceIn(0, 10)
+            val cleanSec = AcademicCatalog.normalizeSection(section).take(24)
+            require(cleanProgram.isNotEmpty() && cleanDept.isNotEmpty()) {
+                "Program and branch/department are required."
+            }
+            require(cleanSec.isNotEmpty()) { "Section is required." }
+            require(entries.isNotEmpty()) { "Add or extract at least one class or exam entry before publishing." }
+
+            val cappedEntries = entries.take(150)
+            val encodedJson = PublishedScheduleCodec.encode(cappedEntries)
+            require(encodedJson.length <= 120000) { "Schedule payload is too large. Split into fewer entries." }
+
+            val cleanTitle = title.trim().ifBlank {
+                "$cleanProgram $cleanDept · Year $safeYear · Sec $cleanSec — ${kind.label}"
+            }.take(120)
+            val cleanPublisher = publisherName.trim().ifBlank { "Campus Admin" }.take(80)
+
+            // Deterministic batch document ID so re-publishing updates the same batch cleanly
+            val rawDocId = "${cleanProgram}_${cleanDept}_y${safeYear}_s${safeSem}_sec_${cleanSec}_${kind.name}"
+                .lowercase()
+                .replace(Regex("[^a-z0-9]+"), "_")
+                .trim('_')
+                .take(100)
+                .ifBlank { "batch_${System.currentTimeMillis()}" }
+
+            val docRef = db.collection("publishedSchedules").document(rawDocId)
+            path = docRef.path
+            val existingSnap = docRef.get().await()
+
+            if (existingSnap.exists()) {
+                docRef.update(
+                    mapOf(
+                        "program" to cleanProgram,
+                        "department" to cleanDept,
+                        "academicYear" to safeYear,
+                        "semester" to safeSem,
+                        "section" to cleanSec,
+                        "scheduleKind" to kind.name,
+                        "title" to cleanTitle,
+                        "entriesJson" to encodedJson,
+                        "entryCount" to cappedEntries.size,
+                        "publishedByUid" to uid,
+                        "publishedByName" to cleanPublisher,
+                        "updatedAt" to FieldValue.serverTimestamp()
+                    )
+                ).await()
+            } else {
+                docRef.set(
+                    mapOf(
+                        "visibility" to "campus",
+                        "program" to cleanProgram,
+                        "department" to cleanDept,
+                        "academicYear" to safeYear,
+                        "semester" to safeSem,
+                        "section" to cleanSec,
+                        "scheduleKind" to kind.name,
+                        "title" to cleanTitle,
+                        "entriesJson" to encodedJson,
+                        "entryCount" to cappedEntries.size,
+                        "publishedByUid" to uid,
+                        "publishedByName" to cleanPublisher,
+                        "createdAt" to FieldValue.serverTimestamp(),
+                        "updatedAt" to FieldValue.serverTimestamp()
+                    )
+                ).await()
+            }
+            Result.success(rawDocId)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.WRITE, path)
+            Result.failure(e)
+        }
+    }
+
+    suspend fun deletePublishedSchedule(scheduleId: String): Result<Unit> {
+        val path = "publishedSchedules/$scheduleId"
+        return try {
+            requireUserId()
+            db.collection("publishedSchedules").document(scheduleId).delete().await()
             Result.success(Unit)
         } catch (e: CancellationException) {
             throw e

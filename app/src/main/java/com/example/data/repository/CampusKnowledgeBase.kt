@@ -2,8 +2,10 @@ package com.example.data.repository
 
 import android.content.Context
 import android.util.Log
+import com.example.data.model.AcademicCatalog
 import com.example.data.model.ScheduleItem
 import com.example.data.model.ScheduleItemType
+import com.example.data.model.StudentAcademicScope
 import org.json.JSONArray
 import org.json.JSONObject
 import java.util.Calendar
@@ -206,6 +208,94 @@ class CampusKnowledgeBase(private val appContext: Context) {
     @Volatile
     private var cachedIndex: RagSearchIndex? = null
 
+    @Volatile
+    private var cachedScopeKey: String? = null
+
+    @Volatile
+    private var cachedScopedPartition: ScopedRagPartition? = null
+
+    private data class ScopedRagPartition(
+        val scope: StudentAcademicScope,
+        val slots: List<IndexedDoc<TimetableSlot>>,
+        val sections: List<IndexedDoc<CampusSection>>,
+        val faculty: List<IndexedDoc<FacultyMember>>,
+        val rooms: List<IndexedDoc<CampusRoom>>
+    )
+
+    private fun getScopedPartition(
+        scope: StudentAcademicScope,
+        fullIndex: RagSearchIndex
+    ): ScopedRagPartition {
+        val key = scope.cacheKey
+        if (cachedScopeKey == key) {
+            cachedScopedPartition?.let { return it }
+        }
+
+        val secRaw = scope.section.trim().lowercase()
+        val secCompact = RagSearchIndex.compactAlphaNum(secRaw)
+        val secTrailingLetter = secCompact.lastOrNull { it.isLetter() }?.toString().orEmpty()
+
+        // 1. Pre-chunk Sections: only the student's own section
+        val scopedSections = fullIndex.sectionDocs.filter { doc ->
+            val s = doc.item.section.trim().lowercase()
+            val sCompact = RagSearchIndex.compactAlphaNum(s)
+            s == secRaw || sCompact == secCompact || (secTrailingLetter.isNotEmpty() && s == secTrailingLetter)
+        }
+
+        // 2. Pre-chunk Timetable Slots: only slots matching student's year/semester/department/section
+        val matchesIot2B = AcademicCatalog.matchesBundledIot2B(scope.department, scope.semester, scope.section)
+        val scopedSlots = if (matchesIot2B) fullIndex.slotDocs else emptyList()
+
+        // 3. Pre-chunk Faculty: department keywords + teachers/mentors of student's section + timetable faculty codes
+        val deptKeywords = AcademicCatalog.facultyDeptKeywords(scope.department)
+        val linkedFacCodes = scopedSlots.flatMap { it.item.facultyCodes }.map { it.lowercase() }.toSet()
+        val linkedSecPeople = scopedSections
+            .flatMap { listOf(it.item.teacherName) + it.item.mentors }
+            .map { it.lowercase() }
+            .filter { it.isNotBlank() }
+
+        val scopedFaculty = fullIndex.facultyDocs.filter { doc ->
+            val deptLow = doc.item.dept.lowercase()
+            val codeLow = doc.item.code.lowercase()
+            val nameLow = doc.item.name.lowercase()
+            (codeLow.isNotEmpty() && codeLow in linkedFacCodes) ||
+                linkedSecPeople.any { ref -> nameLow.contains(ref) || ref.contains(nameLow) } ||
+                deptKeywords.any { kw -> deptLow.contains(kw) }
+        }
+
+        // 4. Pre-chunk Rooms: student's section room/block + timetable rooms + scoped faculty cabins + core shared facilities
+        val linkedRoomKeys = (
+            scopedSlots.map { it.item.room } +
+                scopedSections.map { it.item.room } +
+                scopedFaculty.map { it.item.room }
+            ).map { RagSearchIndex.compactAlphaNum(it) }
+            .filter { it.isNotBlank() }
+            .toSet()
+        val studentBlocks = scopedSections.map { it.item.block.lowercase() }.filter { it.isNotBlank() }.toSet()
+
+        val scopedRooms = fullIndex.roomDocs.filter { doc ->
+            val useLow = doc.item.use.lowercase()
+            val bldLow = doc.item.bld.lowercase()
+            doc.compactKey in linkedRoomKeys ||
+                (studentBlocks.isNotEmpty() && bldLow in studentBlocks) ||
+                useLow.contains("auditorium") || useLow.contains("medical") ||
+                useLow.contains("library") || useLow.contains("canteen") ||
+                useLow.contains("principal") || useLow.contains("office") ||
+                useLow.contains("admission") || useLow.contains("exam")
+        }
+
+        return ScopedRagPartition(
+            scope = scope,
+            slots = scopedSlots,
+            sections = scopedSections,
+            faculty = scopedFaculty,
+            rooms = scopedRooms
+        ).also {
+            cachedScopeKey = key
+            cachedScopedPartition = it
+        }
+    }
+
     fun load(): CampusKnowledgeData {
         cached?.let { return it }
         val loaded = runCatching {
@@ -326,10 +416,16 @@ class CampusKnowledgeBase(private val appContext: Context) {
 
     fun buildRelevantContextForQuery(
         query: String,
-        recentUserTurns: List<String> = emptyList()
+        recentUserTurns: List<String> = emptyList(),
+        studentScope: StudentAcademicScope? = null
     ): String {
         val data = load()
         val index = getIndex()
+        val partition = if (studentScope?.isConfigured == true) {
+            getScopedPartition(studentScope, index)
+        } else {
+            null
+        }
         val q = query.trim().lowercase()
 
         // Expand follow-up pronouns ("what is her room?") with the last user turn at lower weight
@@ -344,18 +440,18 @@ class CampusKnowledgeBase(private val appContext: Context) {
         }
         val combinedText = if (isLikelyFollowUp) "$q ${recentUserTurns.last().lowercase()}" else q
 
-        val singleLetterSections = Regex("\\b(?:sec|section)\\s*[-:]?\\s*([a-z0-9]+)\\b")
+        val explicitSections = Regex("\\b(?:sec|section)\\s*[-:]?\\s*([a-z0-9]+)\\b")
             .findAll(combinedText)
             .map { it.groupValues[1].lowercase() }
             .toSet()
 
         val mentionedDay = detectDayName(q) ?: if (isLikelyFollowUp) detectDayName(recentUserTurns.last().lowercase()) else null
 
-        // Lightweight intent flags keep irrelevant domains out of the prompt to save tokens
+        val asksPersonal = listOf("my ", "our ", "mine", "i have").any { q.contains(it) }
         val asksSchedule = mentionedDay != null || listOf(
             "iot", "2b", "schedule", "timetable", "routine", "period", "lecture", "lab", "next class", "eaa"
         ).any { q.contains(it) }
-        val asksSections = singleLetterSections.isNotEmpty() || listOf(
+        val asksSections = explicitSections.isNotEmpty() || listOf(
             "section", "sec ", "mentor", "class teacher", "coordinator"
         ).any { q.contains(it) }
         val asksFaculty = listOf(
@@ -367,17 +463,33 @@ class CampusKnowledgeBase(private val appContext: Context) {
         val asksAllFaculty = q.contains("all faculty") || q.contains("list faculty")
         val asksAllRooms = q.contains("all room") || q.contains("list room")
 
-        // 1. Retrieve IoT 2B Timetable Slots (focused by day or high-signal BM25 match)
+        // Use ONLY the pre-chunked Year/Semester/Section/Department partition by default;
+        // fall back to full corpus only if the student explicitly asks about another section or gets 0 hits.
+        val activeSlotPool = when {
+            partition == null -> index.slotDocs
+            q.contains("iot 2b") || q.contains("iot2b") -> index.slotDocs
+            else -> partition.slots
+        }
+        val activeSectionPool = when {
+            partition == null -> index.sectionDocs
+            explicitSections.isNotEmpty() && partition.sections.none { it.item.section.lowercase() in explicitSections } -> index.sectionDocs
+            partition.sections.isNotEmpty() -> partition.sections
+            else -> index.sectionDocs
+        }
+        val activeFacultyPool = partition?.faculty?.takeIf { it.isNotEmpty() } ?: index.facultyDocs
+        val activeRoomPool = partition?.rooms?.takeIf { it.isNotEmpty() } ?: index.roomDocs
+
+        // 1. Retrieve Timetable Slots strictly from student's chunk
         val matchedSlots: List<TimetableSlot> = when {
             asksSchedule && mentionedDay != null -> {
-                index.slotDocs.map { it.item }.filter { it.day.equals(mentionedDay, ignoreCase = true) }
+                activeSlotPool.map { it.item }.filter { it.day.equals(mentionedDay, ignoreCase = true) }
             }
-            asksSchedule && (q.contains("iot") || q.contains("2b") || q.contains("timetable") || q.contains("full schedule")) -> {
-                index.slotDocs.map { it.item }
+            asksSchedule && (asksPersonal || q.contains("iot") || q.contains("2b") || q.contains("timetable") || q.contains("full schedule")) -> {
+                activeSlotPool.map { it.item }
             }
             else -> {
                 scoreDocs(
-                    docs = index.slotDocs,
+                    docs = activeSlotPool,
                     index = index,
                     primaryTokens = primaryTokens,
                     secondaryTokens = secondaryTokens,
@@ -386,24 +498,26 @@ class CampusKnowledgeBase(private val appContext: Context) {
             }
         }
 
-        // 2. Retrieve Sections
+        // 2. Retrieve Sections strictly from student's chunk unless another section is named explicitly
         val matchedSections: List<CampusSection> = when {
-            singleLetterSections.isNotEmpty() -> {
-                data.sections.filter { it.section.lowercase() in singleLetterSections }
-                    .ifEmpty { data.sections.take(6) }
+            explicitSections.isNotEmpty() -> {
+                activeSectionPool.map { it.item }.filter { it.section.lowercase() in explicitSections }
+                    .ifEmpty { data.sections.filter { it.section.lowercase() in explicitSections } }
+            }
+            asksSections && partition != null && partition.sections.isNotEmpty() -> {
+                partition.sections.map { it.item }
             }
             asksSections -> {
-                scoreDocs(index.sectionDocs, index, primaryTokens, secondaryTokens, minScore = 1.2)
+                scoreDocs(activeSectionPool, index, primaryTokens, secondaryTokens, minScore = 1.2)
                     .take(6)
-                    .ifEmpty { data.sections }
+                    .ifEmpty { activeSectionPool.map { it.item }.take(6) }
             }
             else -> {
-                scoreDocs(index.sectionDocs, index, primaryTokens, secondaryTokens, minScore = 4.5)
+                scoreDocs(activeSectionPool, index, primaryTokens, secondaryTokens, minScore = 4.5)
                     .take(3)
             }
         }
 
-        // Entity-linking sets from matched slots & sections (resolves codes like SGH/MNC -> full faculty + room floor)
         val linkedFacultyCodes = matchedSlots.flatMap { it.facultyCodes }.map { it.lowercase() }.toSet()
         val linkedTeacherNames = matchedSections
             .flatMap { listOf(it.teacherName) + it.mentors }
@@ -414,65 +528,75 @@ class CampusKnowledgeBase(private val appContext: Context) {
             .filter { it.isNotBlank() }
             .toSet()
 
-        // 3. Retrieve Faculty (BM25 + fuzzy name match + entity links from schedule/sections)
+        // 3. Retrieve Faculty from student's department/section chunk first, fallback to global only if 0 hits on explicit query
         val rawTokensSet = q.split(Regex("[^a-z0-9.]+")).filter { it.isNotBlank() }.toSet()
         val facultyLimit = when {
-            asksAllFaculty -> 25
+            asksAllFaculty -> 20
             asksFaculty || linkedFacultyCodes.isNotEmpty() -> 10
             else -> 5
         }
-        val scoredFaculty = index.facultyDocs.mapNotNull { doc ->
-            var score = bm25FuzzyScore(doc, index, primaryTokens, secondaryTokens)
-            val codeLow = doc.item.code.lowercase()
-            val nameLow = doc.item.name.lowercase()
-            if (codeLow.isNotEmpty() && codeLow in rawTokensSet) score += 14.0
-            if (codeLow.isNotEmpty() && codeLow in linkedFacultyCodes) score += 9.0
-            if (linkedTeacherNames.any { ref -> nameLow.contains(ref) || ref.contains(nameLow) }) score += 10.0
-            val threshold = if (asksFaculty || linkedFacultyCodes.isNotEmpty()) 1.8 else 4.2
-            if (score >= threshold) doc.item to score else null
-        }.sortedByDescending { it.second }
-            .map { it.first }
-            .take(facultyLimit)
+        fun rankFaculty(pool: List<IndexedDoc<FacultyMember>>): List<FacultyMember> =
+            pool.mapNotNull { doc ->
+                var score = bm25FuzzyScore(doc, index, primaryTokens, secondaryTokens)
+                val codeLow = doc.item.code.lowercase()
+                val nameLow = doc.item.name.lowercase()
+                if (codeLow.isNotEmpty() && codeLow in rawTokensSet) score += 14.0
+                if (codeLow.isNotEmpty() && codeLow in linkedFacultyCodes) score += 9.0
+                if (linkedTeacherNames.any { ref -> nameLow.contains(ref) || ref.contains(nameLow) }) score += 10.0
+                val threshold = if (asksFaculty || linkedFacultyCodes.isNotEmpty()) 1.8 else 4.2
+                if (score >= threshold) doc.item to score else null
+            }.sortedByDescending { it.second }.map { it.first }.take(facultyLimit)
 
-        val finalFaculty = if (asksAllFaculty && scoredFaculty.size < 8) {
-            data.faculty.take(25)
-        } else {
-            scoredFaculty
+        var finalFaculty = rankFaculty(activeFacultyPool)
+        if (finalFaculty.isEmpty() && partition != null && (asksFaculty || primaryTokens.isNotEmpty())) {
+            finalFaculty = rankFaculty(index.facultyDocs)
+        }
+        if (asksAllFaculty && finalFaculty.size < 6) {
+            finalFaculty = activeFacultyPool.map { it.item }.take(20)
         }
 
-        // Link cabins of matched faculty to rooms.json so the model knows exact block/floor
         val facultyRoomKeys = finalFaculty
             .map { RagSearchIndex.compactAlphaNum(it.room) }
             .filter { it.isNotBlank() }
             .toSet()
         val allLinkedRooms = linkedRoomKeys + facultyRoomKeys
 
-        // 4. Retrieve Rooms (BM25 + compact room-code match + fuzzy typo tolerance + linked rooms)
+        // 4. Retrieve Rooms from student's chunk first, fallback to global only if 0 hits on explicit room query
         val roomLimit = when {
-            asksAllRooms -> 24
+            asksAllRooms -> 20
             asksRoom -> 10
             else -> 6
         }
         val compactQuery = RagSearchIndex.compactAlphaNum(q)
-        val scoredRooms = index.roomDocs.mapNotNull { doc ->
-            var score = bm25FuzzyScore(doc, index, primaryTokens, secondaryTokens)
-            if (doc.compactKey.length >= 3 && (doc.compactKey in allLinkedRooms || compactQuery.contains(doc.compactKey))) {
-                score += 12.0
-            }
-            val threshold = if (asksRoom || allLinkedRooms.isNotEmpty()) 1.8 else 4.2
-            if (score >= threshold) doc.item to score else null
-        }.sortedByDescending { it.second }
-            .map { it.first }
-            .take(roomLimit)
+        fun rankRooms(pool: List<IndexedDoc<CampusRoom>>): List<CampusRoom> =
+            pool.mapNotNull { doc ->
+                var score = bm25FuzzyScore(doc, index, primaryTokens, secondaryTokens)
+                if (doc.compactKey.length >= 3 && (doc.compactKey in allLinkedRooms || compactQuery.contains(doc.compactKey))) {
+                    score += 12.0
+                }
+                val threshold = if (asksRoom || allLinkedRooms.isNotEmpty()) 1.8 else 4.2
+                if (score >= threshold) doc.item to score else null
+            }.sortedByDescending { it.second }.map { it.first }.take(roomLimit)
+
+        var scoredRooms = rankRooms(activeRoomPool)
+        if (scoredRooms.isEmpty() && partition != null && (asksRoom || primaryTokens.isNotEmpty())) {
+            scoredRooms = rankRooms(index.roomDocs)
+        }
 
         val totalMatched = matchedSlots.size + matchedSections.size + finalFaculty.size + scoredRooms.size
 
-        // 5. Assemble ultra-compact, token-budgeted context string
+        // 5. Assemble ultra-compact, student-scoped RAG context
         val built = buildString {
-            appendLine("CAMPUS KB (${data.faculty.size} faculty, ${data.rooms.size} rooms, ${data.sections.size} sections):")
+            if (partition != null) {
+                appendLine(
+                    "SCOPED KB [${studentScope!!.badgeLabel} | chunk: ${partition.sections.size} sec, ${partition.slots.size} slots, ${partition.faculty.size} fac, ${partition.rooms.size} rooms]:"
+                )
+            } else {
+                appendLine("CAMPUS KB (${data.faculty.size} faculty, ${data.rooms.size} rooms, ${data.sections.size} sections):")
+            }
 
             if (matchedSlots.isNotEmpty()) {
-                appendLine("IoT2B(Day|Per|Time|Subj|Fac|Room):")
+                appendLine("TIMETABLE(Day|Per|Time|Subj|Fac|Room):")
                 matchedSlots.forEach { t ->
                     appendLine("${t.day.take(3)}|${t.periodLabel}|${t.timeRange}|${t.subject}|${t.facultyCodes.joinToString(",")}|${t.room}")
                 }
@@ -497,20 +621,13 @@ class CampusKnowledgeBase(private val appContext: Context) {
             }
 
             if (totalMatched < 2) {
-                val blocks = data.rooms.map { it.bld }.filter { it.isNotBlank() }.distinct().sorted()
-                val depts = data.faculty.map { it.dept }.filter { it.isNotBlank() }.distinct().sorted()
-                appendLine("OVERVIEW: Blocks=${blocks.joinToString(",")}; Depts=${depts.joinToString(",")}; Sections=${data.sections.joinToString(",") { "${it.section}(${it.room})" }}")
-                val keyFacilities = data.rooms.filter { r ->
-                    val u = r.use.lowercase()
-                    u.contains("auditorium") || u.contains("medical") || u.contains("library") ||
-                        u.contains("canteen") || u.contains("office") || u.contains("admission") ||
-                        u.contains("principal")
-                }.take(10)
-                if (keyFacilities.isNotEmpty()) {
-                    appendLine("FACILITIES(Room|Use|Bld|Flr):")
-                    keyFacilities.forEach { r ->
-                        appendLine("${r.room}|${r.use}|${r.bld}|${r.floor}")
-                    }
+                if (partition != null && partition.sections.isNotEmpty()) {
+                    val mySec = partition.sections.first().item
+                    appendLine("MY_SECTION: Sec ${mySec.section} | ${mySec.block} ${mySec.floor} ${mySec.room} | Teacher: ${mySec.teacherName} (${mySec.teacherPhone}, ${mySec.teacherEmail}) | Mentors: ${mySec.mentors.joinToString(",")}")
+                } else {
+                    val blocks = data.rooms.map { it.bld }.filter { it.isNotBlank() }.distinct().sorted()
+                    val depts = data.faculty.map { it.dept }.filter { it.isNotBlank() }.distinct().sorted()
+                    appendLine("OVERVIEW: Blocks=${blocks.joinToString(",")}; Depts=${depts.joinToString(",")}")
                 }
             }
         }.trim()

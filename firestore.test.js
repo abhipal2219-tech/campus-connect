@@ -441,3 +441,68 @@ test("Tickets: student create/read/close works; terminal CLOSED locks student; a
     })
   );
 });
+
+// 8. Admin-Published Batch Schedules
+test("PublishedSchedules: admin create/update/delete succeeds; student read allowed; student & unauth writes denied", async () => {
+  const adminDb = adminContext().firestore();
+  const aliceDb = testEnv.authenticatedContext(ALICE_UID).firestore();
+  const unauthDb = testEnv.unauthenticatedContext().firestore();
+  const ts = pastTime(5000);
+
+  const payload = {
+    visibility: "campus",
+    program: "B.Tech.",
+    department: "CSE",
+    academicYear: 3,
+    semester: 5,
+    section: "C",
+    scheduleKind: "CLASS",
+    title: "B.Tech. CSE · Year 3 · Section C",
+    entriesJson: "[{\"itemType\":\"CLASS\",\"courseCode\":\"CS-501\",\"title\":\"DBMS\",\"dayOfWeek\":1,\"startTimeMinutes\":540,\"endTimeMinutes\":600,\"examEpochMillis\":0,\"location\":\"B2 204\",\"instructor\":\"Prof. Roy\"}]",
+    entryCount: 1,
+    publishedByUid: ADMIN_UID,
+    publishedByName: "Campus Admin",
+    createdAt: ts,
+    updatedAt: ts,
+  };
+
+  // Unauthenticated denied
+  await assertFails(unauthDb.collection("publishedSchedules").where("visibility", "==", "campus").get());
+
+  // Student cannot create published schedules
+  await assertFails(
+    aliceDb.collection("publishedSchedules").doc("btech_cse_y3_c_class").set({
+      ...payload,
+      publishedByUid: ALICE_UID,
+    })
+  );
+
+  // Admin can publish
+  await assertSucceeds(
+    adminDb.collection("publishedSchedules").doc("btech_cse_y3_c_class").set(payload)
+  );
+
+  // Authenticated student can list with visibility == campus and get doc
+  await assertSucceeds(
+    aliceDb.collection("publishedSchedules").where("visibility", "==", "campus").get()
+  );
+  await assertSucceeds(
+    aliceDb.collection("publishedSchedules").doc("btech_cse_y3_c_class").get()
+  );
+  // Unfiltered list denied
+  await assertFails(aliceDb.collection("publishedSchedules").get());
+
+  // Admin can update preserving createdAt
+  await assertSucceeds(
+    adminDb.collection("publishedSchedules").doc("btech_cse_y3_c_class").update({
+      title: "B.Tech. CSE · Year 3 · Section C (Updated)",
+      publishedByUid: ADMIN_UID,
+      updatedAt: pastTime(1000),
+    })
+  );
+
+  // Student cannot delete; Admin can delete
+  await assertFails(aliceDb.collection("publishedSchedules").doc("btech_cse_y3_c_class").delete());
+  await assertSucceeds(adminDb.collection("publishedSchedules").doc("btech_cse_y3_c_class").delete());
+});
+

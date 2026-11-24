@@ -1,5 +1,7 @@
 package com.example.ui.screens
 
+import android.net.Uri
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -34,6 +36,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
@@ -52,7 +55,10 @@ import com.example.data.model.AnnouncementSeverity
 import com.example.data.model.DirectoryCategory
 import com.example.data.model.DirectoryOffice
 import com.example.data.model.HelpdeskTicket
+import com.example.data.model.PublishedSchedule
+import com.example.data.model.PublishedScheduleKind
 import com.example.data.model.ScheduleFormatter
+import com.example.data.model.ScheduleItem
 import com.example.data.model.TicketPriority
 import com.example.data.model.TicketStatus
 import com.example.data.model.UiState
@@ -61,39 +67,91 @@ import com.example.ui.components.MonochromeCard
 import com.example.ui.components.MonochromeEmptyState
 import com.example.ui.components.MonochromeErrorCard
 import com.example.ui.components.MonochromeLoadingState
-import com.example.ui.components.SegmentedMonochromeTabs
 
 @Composable
 fun AdminScreen(
     allTicketsState: UiState<List<HelpdeskTicket>>,
     directoryState: UiState<List<DirectoryOffice>>,
+    publishedSchedulesState: UiState<List<PublishedSchedule>>,
     adminRecords: List<AdminRecord>,
+    adminDraftEntries: List<ScheduleItem>,
+    isExtractingDraft: Boolean,
+    draftError: String?,
+    isPublishingSchedule: Boolean,
     onBroadcastAlert: (AnnouncementSeverity, String, String, String, () -> Unit) -> Unit,
+    onExtractDraftFromUri: (Uri) -> Unit,
+    onAddDraftEntry: (ScheduleItem) -> Unit,
+    onRemoveDraftEntry: (Int) -> Unit,
+    onClearDraft: () -> Unit,
+    onDismissDraftError: () -> Unit,
+    onPublishSchedule: (
+        program: String,
+        department: String,
+        academicYear: Int,
+        semester: Int,
+        section: String,
+        kind: PublishedScheduleKind,
+        title: String,
+        onComplete: () -> Unit
+    ) -> Unit,
+    onDeletePublishedSchedule: (String) -> Unit,
     onTriageTicket: (String, TicketStatus, TicketPriority, String, () -> Unit) -> Unit,
     onSaveDirectoryOffice: (DirectoryOffice, () -> Unit) -> Unit,
     onDeleteDirectoryOffice: (String) -> Unit,
     onGrantAdmin: (String, String, () -> Unit) -> Unit,
     onRevokeAdmin: (String) -> Unit
 ) {
-    var selectedSection by rememberSaveable { mutableIntStateOf(0) } // 0=Broadcast, 1=Tickets, 2=Directory, 3=Roles
+    val adminTabs = remember { listOf("Broadcast", "Schedules", "Tickets", "Directory", "Roles") }
+    var selectedSection by rememberSaveable { mutableIntStateOf(0) } // 0=Broadcast, 1=Schedules, 2=Tickets, 3=Directory, 4=Roles
 
     Column(modifier = Modifier.fillMaxSize()) {
-        Box(modifier = Modifier.padding(horizontal = 16.dp, vertical = 10.dp)) {
-            SegmentedMonochromeTabs(
-                options = listOf("Broadcast", "Tickets", "Directory", "Roles"),
-                selectedIndex = selectedSection,
-                onSelected = { selectedSection = it },
-                tagPrefix = "admin_section"
-            )
+        LazyRow(
+            contentPadding = PaddingValues(horizontal = 16.dp, vertical = 10.dp),
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            items(adminTabs.indices.toList()) { idx ->
+                val selected = selectedSection == idx
+                Surface(
+                    onClick = { selectedSection = idx },
+                    shape = MaterialTheme.shapes.small,
+                    color = if (selected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surface,
+                    border = BorderStroke(
+                        1.dp,
+                        if (selected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outlineVariant
+                    ),
+                    modifier = Modifier.testTag("admin_section_$idx")
+                ) {
+                    Text(
+                        text = adminTabs[idx],
+                        style = MaterialTheme.typography.labelLarge,
+                        color = if (selected) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurface,
+                        modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp)
+                    )
+                }
+            }
         }
 
         when (selectedSection) {
             0 -> AdminBroadcastPane(onBroadcastAlert = onBroadcastAlert)
-            1 -> AdminTicketsPane(
+            1 -> AdminSchedulesPane(
+                publishedSchedulesState = publishedSchedulesState,
+                draftEntries = adminDraftEntries,
+                isExtractingDraft = isExtractingDraft,
+                draftError = draftError,
+                isPublishing = isPublishingSchedule,
+                onExtractDraftFromUri = onExtractDraftFromUri,
+                onAddDraftEntry = onAddDraftEntry,
+                onRemoveDraftEntry = onRemoveDraftEntry,
+                onClearDraft = onClearDraft,
+                onDismissDraftError = onDismissDraftError,
+                onPublishSchedule = onPublishSchedule,
+                onDeletePublishedSchedule = onDeletePublishedSchedule
+            )
+            2 -> AdminTicketsPane(
                 allTicketsState = allTicketsState,
                 onTriageTicket = onTriageTicket
             )
-            2 -> AdminDirectoryPane(
+            3 -> AdminDirectoryPane(
                 directoryState = directoryState,
                 onSaveOffice = onSaveDirectoryOffice,
                 onDeleteOffice = onDeleteDirectoryOffice

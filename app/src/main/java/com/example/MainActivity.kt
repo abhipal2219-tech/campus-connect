@@ -53,6 +53,7 @@ import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.material3.VerticalDivider
@@ -78,9 +79,11 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.example.data.firebase.configureAppCheck
 import com.example.data.firebase.signOutUser
+import com.example.data.model.PublishedSchedule
 import com.example.data.model.UiState
 import com.example.ui.components.LiveAlertBanner
 import com.example.ui.components.MonochromeBadge
+import com.example.ui.components.MonochromeLoadingState
 import com.example.ui.screens.AccountPreferencesSheet
 import com.example.ui.screens.AdminScreen
 import com.example.ui.screens.AlertsScreen
@@ -88,6 +91,7 @@ import com.example.ui.screens.AssistantScreen
 import com.example.ui.screens.AuthScreen
 import com.example.ui.screens.CampusScreen
 import com.example.ui.screens.ScheduleScreen
+import com.example.ui.screens.StudentOnboardingScreen
 import com.example.ui.theme.CampusBotTheme
 import com.example.viewmodel.CampusBotViewModel
 import com.google.firebase.Firebase
@@ -180,6 +184,9 @@ private fun CampusBotShell(
     )
 
     val userProfile by vm.userProfile.collectAsStateWithLifecycle()
+    val isProfileLoaded by vm.isProfileLoaded.collectAsStateWithLifecycle()
+    val isSavingOnboarding by vm.savingOnboarding.collectAsStateWithLifecycle()
+    val onboardingError by vm.onboardingError.collectAsStateWithLifecycle()
     val isAdmin by vm.isAdmin.collectAsStateWithLifecycle()
     val adminRecords by vm.adminRecords.collectAsStateWithLifecycle()
     val scheduleState by vm.scheduleState.collectAsStateWithLifecycle()
@@ -187,17 +194,23 @@ private fun CampusBotShell(
     val myTicketsState by vm.myTicketsState.collectAsStateWithLifecycle()
     val allTicketsState by vm.allTicketsState.collectAsStateWithLifecycle()
     val announcementsState by vm.announcementsState.collectAsStateWithLifecycle()
+    val publishedSchedulesState by vm.publishedSchedulesState.collectAsStateWithLifecycle()
     val chatMessagesState by vm.chatMessagesState.collectAsStateWithLifecycle()
     val aiLoading by vm.aiLoading.collectAsStateWithLifecycle()
     val aiStreamingText by vm.aiStreamingText.collectAsStateWithLifecycle()
     val aiError by vm.aiError.collectAsStateWithLifecycle()
     val liveAlertBanner by vm.liveAlertBanner.collectAsStateWithLifecycle()
+    val liveScheduleBanner by vm.liveScheduleBanner.collectAsStateWithLifecycle()
     val snackbarMessage by vm.snackbarMessage.collectAsStateWithLifecycle()
     val knowledgeData by vm.knowledgeData.collectAsStateWithLifecycle()
     val isImportingTimetable by vm.importingTimetable.collectAsStateWithLifecycle()
     val isExtractingSchedule by vm.extractingSchedule.collectAsStateWithLifecycle()
     val extractionError by vm.extractionError.collectAsStateWithLifecycle()
     val lastImportSummary by vm.lastImportSummary.collectAsStateWithLifecycle()
+    val adminDraftEntries by vm.adminDraftEntries.collectAsStateWithLifecycle()
+    val adminExtractingDraft by vm.adminExtractingDraft.collectAsStateWithLifecycle()
+    val adminDraftError by vm.adminDraftError.collectAsStateWithLifecycle()
+    val publishingSchedule by vm.publishingSchedule.collectAsStateWithLifecycle()
     val classroomState by vm.classroomState.collectAsStateWithLifecycle()
 
     val tabs = remember(isAdmin) {
@@ -206,6 +219,64 @@ private fun CampusBotShell(
     var selectedTab by rememberSaveable { mutableStateOf(CampusTab.ASSISTANT) }
     var campusInitialSegment by rememberSaveable { mutableIntStateOf(0) }
     var showAccountSheet by remember { mutableStateOf(false) }
+
+    // Wait for initial Firestore profile load before deciding onboarding vs main shell
+    if (!isProfileLoaded) {
+        Scaffold(
+            contentWindowInsets = WindowInsets.safeDrawing,
+            containerColor = MaterialTheme.colorScheme.background
+        ) { innerPadding ->
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(innerPadding)
+            ) {
+                MonochromeLoadingState("Loading your student profile...")
+            }
+        }
+        return
+    }
+
+    // First sign-in academic details gate: unlocks scoped RAG chatbot & direct schedule/exam import
+    if (userProfile?.needsAcademicOnboarding != false) {
+        StudentOnboardingScreen(
+            profile = userProfile,
+            isGuestMode = isGuestMode,
+            isSaving = isSavingOnboarding,
+            serverError = onboardingError,
+            onClearError = vm::clearOnboardingError,
+            onCompleteOnboarding = { program, department, semester, section, rollNumber, enrollmentNumber, autoImportBundled, scheduleFileUri ->
+                vm.completeAcademicOnboarding(
+                    program = program,
+                    department = department,
+                    semester = semester,
+                    section = section,
+                    rollNumber = rollNumber,
+                    enrollmentNumber = enrollmentNumber,
+                    autoImportBundledSchedule = autoImportBundled,
+                    scheduleFileUri = scheduleFileUri,
+                    onComplete = {
+                        if (scheduleFileUri != null) {
+                            selectedTab = CampusTab.SCHEDULE
+                        }
+                    }
+                )
+            },
+            onSignOut = {
+                if (isGuestMode) {
+                    onRequestSignIn()
+                } else {
+                    signOutUser(
+                        credentialManager = credentialManager,
+                        scope = scope
+                    )
+                }
+            }
+        )
+        return
+    }
+
+    val studentScope = remember(userProfile) { userProfile?.toAcademicScope() }
 
     if (selectedTab == CampusTab.ADMIN && !isAdmin) {
         selectedTab = CampusTab.ASSISTANT
@@ -227,6 +298,10 @@ private fun CampusBotShell(
     val scheduleItems = (scheduleState as? UiState.Success)?.data.orEmpty()
     val announcements = (announcementsState as? UiState.Success)?.data.orEmpty()
     val directoryCount = (directoryState as? UiState.Success)?.data?.size ?: 0
+    val matchingPublishedSchedules = remember(publishedSchedulesState, studentScope) {
+        (publishedSchedulesState as? UiState.Success)?.data.orEmpty()
+            .filter { it.matchesScope(studentScope) }
+    }
 
     BoxWithConstraints(modifier = Modifier.fillMaxSize()) {
         val useRail = maxWidth >= 600.dp
@@ -245,6 +320,13 @@ private fun CampusBotShell(
                                     style = MaterialTheme.typography.headlineMedium,
                                     color = MaterialTheme.colorScheme.onSurface
                                 )
+                                if (studentScope?.isConfigured == true) {
+                                    Text(
+                                        text = studentScope.badgeLabel,
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                }
                             }
                         },
                         actions = {
@@ -380,6 +462,25 @@ private fun CampusBotShell(
                             .fillMaxSize()
                     ) {
                         AnimatedVisibility(
+                            visible = liveScheduleBanner != null,
+                            enter = expandVertically() + fadeIn(),
+                            exit = shrinkVertically() + fadeOut()
+                        ) {
+                            liveScheduleBanner?.let { published ->
+                                Box(modifier = Modifier.padding(horizontal = 16.dp, vertical = 6.dp)) {
+                                    LiveSchedulePublishedBanner(
+                                        schedule = published,
+                                        onImport = {
+                                            vm.importPublishedSchedule(published)
+                                            selectedTab = CampusTab.SCHEDULE
+                                        },
+                                        onDismiss = vm::dismissLiveScheduleBanner
+                                    )
+                                }
+                            }
+                        }
+
+                        AnimatedVisibility(
                             visible = liveAlertBanner != null,
                             enter = expandVertically() + fadeIn(),
                             exit = shrinkVertically() + fadeOut()
@@ -406,6 +507,7 @@ private fun CampusBotShell(
                                     scheduleItems = scheduleItems,
                                     announcements = announcements,
                                     directoryCount = directoryCount,
+                                    studentScope = studentScope,
                                     isAiLoading = aiLoading,
                                     streamingText = aiStreamingText,
                                     aiError = aiError,
@@ -421,6 +523,8 @@ private fun CampusBotShell(
                                 CampusTab.SCHEDULE -> ScheduleScreen(
                                     scheduleState = scheduleState,
                                     classroomState = classroomState,
+                                    studentScope = studentScope,
+                                    matchingPublishedSchedules = matchingPublishedSchedules,
                                     defaultLeadMinutes = userProfile?.reminderLeadMinutes ?: 30,
                                     iotSlotCount = knowledgeData.iot2BSlots.size,
                                     isImportingTimetable = isImportingTimetable,
@@ -428,6 +532,7 @@ private fun CampusBotShell(
                                     extractionError = extractionError,
                                     lastImportSummary = lastImportSummary,
                                     onImportIot2B = vm::importIot2BTimetable,
+                                    onImportPublishedSchedule = vm::importPublishedSchedule,
                                     onImportScheduleFile = vm::importScheduleFromUri,
                                     onDismissExtractionError = vm::clearExtractionError,
                                     onDismissImportSummary = vm::dismissImportSummary,
@@ -466,8 +571,20 @@ private fun CampusBotShell(
                                 CampusTab.ADMIN -> AdminScreen(
                                     allTicketsState = allTicketsState,
                                     directoryState = directoryState,
+                                    publishedSchedulesState = publishedSchedulesState,
                                     adminRecords = adminRecords,
+                                    adminDraftEntries = adminDraftEntries,
+                                    isExtractingDraft = adminExtractingDraft,
+                                    draftError = adminDraftError,
+                                    isPublishingSchedule = publishingSchedule,
                                     onBroadcastAlert = vm::broadcastAnnouncement,
+                                    onExtractDraftFromUri = vm::extractAdminDraftFromUri,
+                                    onAddDraftEntry = vm::addAdminDraftEntry,
+                                    onRemoveDraftEntry = vm::removeAdminDraftEntry,
+                                    onClearDraft = vm::clearAdminDraftEntries,
+                                    onDismissDraftError = vm::clearAdminDraftError,
+                                    onPublishSchedule = vm::publishBatchSchedule,
+                                    onDeletePublishedSchedule = vm::deletePublishedSchedule,
                                     onTriageTicket = vm::triageTicketAsAdmin,
                                     onSaveDirectoryOffice = vm::saveDirectoryOffice,
                                     onDeleteDirectoryOffice = vm::deleteDirectoryOffice,
@@ -498,5 +615,52 @@ private fun CampusBotShell(
             },
             onSignInWithGoogle = onRequestSignIn
         )
+    }
+}
+
+@Composable
+private fun LiveSchedulePublishedBanner(
+    schedule: PublishedSchedule,
+    onImport: () -> Unit,
+    onDismiss: () -> Unit
+) {
+    Surface(
+        shape = MaterialTheme.shapes.medium,
+        color = MaterialTheme.colorScheme.primary,
+        modifier = Modifier
+            .fillMaxWidth()
+            .testTag("live_schedule_published_banner")
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 14.dp, vertical = 10.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.SpaceBetween
+        ) {
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = "OFFICIAL ${schedule.parsedKind.label.uppercase()} LIVE",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onPrimary.copy(alpha = 0.78f)
+                )
+                Text(
+                    text = "${schedule.batchLabel} (${schedule.entryCount} entries)",
+                    style = MaterialTheme.typography.titleSmall,
+                    color = MaterialTheme.colorScheme.onPrimary
+                )
+            }
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                TextButton(
+                    onClick = onImport,
+                    modifier = Modifier.testTag("live_banner_import_schedule_button")
+                ) {
+                    Text("Import", color = MaterialTheme.colorScheme.onPrimary)
+                }
+                TextButton(onClick = onDismiss) {
+                    Text("Dismiss", color = MaterialTheme.colorScheme.onPrimary.copy(alpha = 0.78f))
+                }
+            }
+        }
     }
 }

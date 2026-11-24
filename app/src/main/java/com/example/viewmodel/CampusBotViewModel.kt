@@ -9,6 +9,7 @@ import android.util.Log
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
+import com.example.data.model.AcademicCatalog
 import com.example.data.model.AdminRecord
 import com.example.data.model.AnnouncementSeverity
 import com.example.data.model.CampusAnnouncement
@@ -18,6 +19,9 @@ import com.example.data.model.ClassroomAssignment
 import com.example.data.model.ClassroomUiState
 import com.example.data.model.DirectoryOffice
 import com.example.data.model.HelpdeskTicket
+import com.example.data.model.PublishedSchedule
+import com.example.data.model.PublishedScheduleCodec
+import com.example.data.model.PublishedScheduleKind
 import com.example.data.model.ScheduleFormatter
 import com.example.data.model.ScheduleItem
 import com.example.data.model.ScheduleItemType
@@ -47,9 +51,11 @@ import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.catch
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.onEach
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -77,7 +83,13 @@ class CampusBotViewModel(
             userId = "guest",
             displayName = "Guest Student",
             email = "",
-            department = "Guest Session (Local)",
+            program = "",
+            department = "",
+            semester = 0,
+            section = "",
+            rollNumber = "",
+            enrollmentNumber = "",
+            profileCompleted = false,
             notificationsEnabled = true,
             reminderLeadMinutes = 30
         )
@@ -85,16 +97,35 @@ class CampusBotViewModel(
     private val _guestSchedule = MutableStateFlow<List<ScheduleItem>>(emptyList())
     private val _guestChatMessages = MutableStateFlow<List<ChatMessage>>(emptyList())
 
+    private val _isProfileLoaded = MutableStateFlow(isGuestMode)
+    val isProfileLoaded: StateFlow<Boolean> = _isProfileLoaded.asStateFlow()
+
+    private val _fallbackProfile = MutableStateFlow<UserProfile?>(null)
+
+    private val _savingOnboarding = MutableStateFlow(false)
+    val savingOnboarding: StateFlow<Boolean> = _savingOnboarding.asStateFlow()
+
+    private val _onboardingError = MutableStateFlow<String?>(null)
+    val onboardingError: StateFlow<String?> = _onboardingError.asStateFlow()
+
     val userProfile: StateFlow<UserProfile?> = if (isGuestMode) {
         _guestProfile.asStateFlow()
     } else {
-        repository.observeUserProfile()
-            .catch { error ->
-                val fsErr = unwrapFirestoreError(error)
-                if (fsErr == null && error is CancellationException) throw error
-                Log.e(VM_TAG, "Profile stream error", error)
-                emit(null)
-            }
+        combine(
+            repository.observeUserProfile()
+                .onEach { live ->
+                    if (live != null) {
+                        _isProfileLoaded.value = true
+                    }
+                }
+                .catch { error ->
+                    val fsErr = unwrapFirestoreError(error)
+                    if (fsErr == null && error is CancellationException) throw error
+                    Log.e(VM_TAG, "Profile stream error", error)
+                    emit(null)
+                },
+            _fallbackProfile
+        ) { live, fallback -> live ?: fallback }
             .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000L), null)
     }
 
@@ -165,6 +196,12 @@ class CampusBotViewModel(
         repository.observeAnnouncements().toUiStateFlow("Failed to load campus alerts")
     }
 
+    val publishedSchedulesState: StateFlow<UiState<List<PublishedSchedule>>> = if (isGuestMode) {
+        MutableStateFlow<UiState<List<PublishedSchedule>>>(UiState.Success(emptyList())).asStateFlow()
+    } else {
+        repository.observePublishedSchedules().toUiStateFlow("Failed to load official schedules")
+    }
+
     val chatMessagesState: StateFlow<UiState<List<ChatMessage>>> = if (isGuestMode) {
         _guestChatMessages
             .map<List<ChatMessage>, UiState<List<ChatMessage>>> { UiState.Success(it) }
@@ -185,6 +222,9 @@ class CampusBotViewModel(
     private val _liveAlertBanner = MutableStateFlow<CampusAnnouncement?>(null)
     val liveAlertBanner: StateFlow<CampusAnnouncement?> = _liveAlertBanner.asStateFlow()
 
+    private val _liveScheduleBanner = MutableStateFlow<PublishedSchedule?>(null)
+    val liveScheduleBanner: StateFlow<PublishedSchedule?> = _liveScheduleBanner.asStateFlow()
+
     private val _snackbarMessage = MutableStateFlow<String?>(null)
     val snackbarMessage: StateFlow<String?> = _snackbarMessage.asStateFlow()
 
@@ -200,12 +240,27 @@ class CampusBotViewModel(
     private val _lastImportSummary = MutableStateFlow<String?>(null)
     val lastImportSummary: StateFlow<String?> = _lastImportSummary.asStateFlow()
 
+    // Admin batch schedule publisher draft states
+    private val _adminDraftEntries = MutableStateFlow<List<ScheduleItem>>(emptyList())
+    val adminDraftEntries: StateFlow<List<ScheduleItem>> = _adminDraftEntries.asStateFlow()
+
+    private val _adminExtractingDraft = MutableStateFlow(false)
+    val adminExtractingDraft: StateFlow<Boolean> = _adminExtractingDraft.asStateFlow()
+
+    private val _adminDraftError = MutableStateFlow<String?>(null)
+    val adminDraftError: StateFlow<String?> = _adminDraftError.asStateFlow()
+
+    private val _publishingSchedule = MutableStateFlow(false)
+    val publishingSchedule: StateFlow<Boolean> = _publishingSchedule.asStateFlow()
+
     private val _classroomState = MutableStateFlow<ClassroomUiState>(ClassroomUiState.Disconnected)
     val classroomState: StateFlow<ClassroomUiState> = _classroomState.asStateFlow()
     private var cachedClassroomAccessToken: String? = null
 
     private val seenAnnouncementIds = mutableSetOf<String>()
     private var announcementsBaselineLoaded = false
+    private val seenPublishedScheduleVersions = mutableMapOf<String, Long>()
+    private var publishedSchedulesBaselineLoaded = false
     private var directorySeedAttempted = false
 
     init {
@@ -220,6 +275,9 @@ class CampusBotViewModel(
         if (!isGuestMode) {
             viewModelScope.launch {
                 repository.ensureUserProfile()
+                    .onSuccess { ensured -> _fallbackProfile.value = ensured }
+                    .onFailure { err -> Log.e(VM_TAG, "ensureUserProfile failed", err) }
+                _isProfileLoaded.value = true
             }
 
             // Seed starter campus directory once when an Admin signs in and directory is empty
@@ -248,6 +306,46 @@ class CampusBotViewModel(
                                 val notificationsOn = userProfile.value?.notificationsEnabled ?: true
                                 if (notificationsOn) {
                                     CampusNotificationManager.showAnnouncementNotification(appContext, newestUnseen)
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Real-time notification when Admin publishes or updates a schedule matching this student's branch/year/section
+            viewModelScope.launch {
+                publishedSchedulesState.collect { state ->
+                    if (state is UiState.Success) {
+                        val list = state.data
+                        if (!publishedSchedulesBaselineLoaded) {
+                            list.forEach { ps ->
+                                if (ps.id.isNotBlank()) {
+                                    seenPublishedScheduleVersions[ps.id] =
+                                        ps.updatedAt?.toDate()?.time ?: ps.createdAt?.toDate()?.time ?: 0L
+                                }
+                            }
+                            publishedSchedulesBaselineLoaded = true
+                        } else {
+                            val scope = userProfile.value?.toAcademicScope()
+                            var matchingNewlyPublished: PublishedSchedule? = null
+                            list.forEach { ps ->
+                                if (ps.id.isNotBlank()) {
+                                    val versionTs = ps.updatedAt?.toDate()?.time ?: ps.createdAt?.toDate()?.time ?: 0L
+                                    val prevTs = seenPublishedScheduleVersions[ps.id]
+                                    if (prevTs == null || versionTs > prevTs) {
+                                        seenPublishedScheduleVersions[ps.id] = versionTs
+                                        if (ps.matchesScope(scope)) {
+                                            matchingNewlyPublished = ps
+                                        }
+                                    }
+                                }
+                            }
+                            matchingNewlyPublished?.let { liveSchedule ->
+                                _liveScheduleBanner.value = liveSchedule
+                                val notificationsOn = userProfile.value?.notificationsEnabled ?: true
+                                if (notificationsOn) {
+                                    CampusNotificationManager.showSchedulePublishedNotification(appContext, liveSchedule)
                                 }
                             }
                         }
@@ -306,6 +404,7 @@ class CampusBotViewModel(
 
             var finalReply = ""
             val pendingAssignments = (_classroomState.value as? ClassroomUiState.Connected)?.assignments.orEmpty()
+            val studentScope = userProfile.value?.toAcademicScope()
             try {
                 aiRepository.streamCampusReply(
                     userPrompt = prompt,
@@ -313,7 +412,8 @@ class CampusBotViewModel(
                     scheduleItems = schedule,
                     announcements = alerts,
                     directory = offices,
-                    pendingAssignments = pendingAssignments
+                    pendingAssignments = pendingAssignments,
+                    studentScope = studentScope
                 ).collect { partial ->
                     finalReply = partial
                     _aiStreamingText.value = partial
@@ -511,13 +611,219 @@ class CampusBotViewModel(
                     }
                 }
                 _snackbarMessage.value = if (importedCount > 0) {
-                    "Imported $importedCount IoT 2B classes with push reminders."
+                    "Imported $importedCount classes with push reminders."
                 } else {
-                    "Could not import IoT 2B timetable. Please try again."
+                    "Could not import timetable. Please try again."
                 }
             } finally {
                 _importingTimetable.value = false
             }
+        }
+    }
+
+    fun importPublishedSchedule(published: PublishedSchedule) {
+        if (_importingTimetable.value) return
+        viewModelScope.launch {
+            _importingTimetable.value = true
+            try {
+                val leadMinutes = userProfile.value?.reminderLeadMinutes ?: 30
+                val candidates = PublishedScheduleCodec.decode(published.entriesJson, leadMinutes)
+                if (candidates.isEmpty()) {
+                    _snackbarMessage.value = "No schedule entries found in ${published.batchLabel}."
+                    return@launch
+                }
+
+                val existing = (scheduleState.value as? UiState.Success)?.data.orEmpty()
+                val existingKeys = existing.map { item ->
+                    "${item.itemType}_${item.dayOfWeek}_${item.startTimeMinutes}_${item.examEpochMillis}_${item.title.trim().lowercase()}"
+                }.toSet()
+
+                val toInsert = candidates
+                    .distinctBy { item ->
+                        "${item.itemType}_${item.dayOfWeek}_${item.startTimeMinutes}_${item.examEpochMillis}_${item.title.trim().lowercase()}"
+                    }
+                    .filterNot { item ->
+                        "${item.itemType}_${item.dayOfWeek}_${item.startTimeMinutes}_${item.examEpochMillis}_${item.title.trim().lowercase()}" in existingKeys
+                    }
+
+                if (toInsert.isEmpty()) {
+                    if (_liveScheduleBanner.value?.id == published.id) {
+                        _liveScheduleBanner.value = null
+                    }
+                    _snackbarMessage.value = "Your ${published.parsedKind.label.lowercase()} is already imported."
+                    return@launch
+                }
+
+                var addedClasses = 0
+                var addedExams = 0
+                if (isGuestMode) {
+                    val localized = toInsert.map { item ->
+                        if (item.parsedType == ScheduleItemType.EXAM) addedExams++ else addedClasses++
+                        item.copy(id = "guest_pub_${UUID.randomUUID()}", userId = "guest")
+                    }
+                    _guestSchedule.value = _guestSchedule.value + localized
+                    localized.forEach { CampusNotificationManager.syncScheduleReminder(appContext, it) }
+                } else {
+                    toInsert.chunked(10).forEach { batch ->
+                        val results = coroutineScope {
+                            batch.map { item ->
+                                async { item to repository.upsertScheduleItem(item) }
+                            }.awaitAll()
+                        }
+                        results.forEach { (item, res) ->
+                            res.onSuccess { savedId ->
+                                if (item.parsedType == ScheduleItemType.EXAM) addedExams++ else addedClasses++
+                                CampusNotificationManager.syncScheduleReminder(appContext, item.copy(id = savedId))
+                            }
+                        }
+                    }
+                }
+
+                if (_liveScheduleBanner.value?.id == published.id) {
+                    _liveScheduleBanner.value = null
+                }
+                val total = addedClasses + addedExams
+                if (total > 0) {
+                    val summary = buildString {
+                        append("Imported ")
+                        val parts = buildList {
+                            if (addedClasses > 0) add("$addedClasses ${if (addedClasses == 1) "class" else "classes"}")
+                            if (addedExams > 0) add("$addedExams ${if (addedExams == 1) "exam" else "exams"}")
+                        }
+                        append(parts.joinToString(" and "))
+                        append(" for ${published.batchLabel}.")
+                    }
+                    _lastImportSummary.value = summary
+                    _snackbarMessage.value = summary
+                } else {
+                    _snackbarMessage.value = "Could not import published schedule. Please try again."
+                }
+            } finally {
+                _importingTimetable.value = false
+            }
+        }
+    }
+
+    fun dismissLiveScheduleBanner() {
+        _liveScheduleBanner.value = null
+    }
+
+    // --- Admin Batch Schedule Publishing Actions ---
+
+    fun extractAdminDraftFromUri(uri: Uri) {
+        if (_adminExtractingDraft.value) return
+        viewModelScope.launch {
+            _adminExtractingDraft.value = true
+            _adminDraftError.value = null
+            try {
+                val extracted = aiRepository.extractScheduleFromUri(
+                    appContext = appContext,
+                    uri = uri,
+                    defaultLeadMinutes = 30
+                )
+                if (extracted.isEmpty()) {
+                    _adminDraftError.value = "No class or exam entries could be extracted from that file. Try a clearer image or PDF."
+                    return@launch
+                }
+                val current = _adminDraftEntries.value
+                val existingKeys = current.map {
+                    "${it.itemType}_${it.dayOfWeek}_${it.startTimeMinutes}_${it.examEpochMillis}_${it.title.trim().lowercase()}"
+                }.toSet()
+                val fresh = extracted.filterNot {
+                    "${it.itemType}_${it.dayOfWeek}_${it.startTimeMinutes}_${it.examEpochMillis}_${it.title.trim().lowercase()}" in existingKeys
+                }
+                _adminDraftEntries.value = (current + fresh).take(150)
+                _snackbarMessage.value = "Extracted ${fresh.size} entries into draft. Review and publish to students."
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                Log.e(VM_TAG, "Admin draft extraction failed", e)
+                _adminDraftError.value = e.localizedMessage ?: "Failed to read schedule file."
+            } finally {
+                _adminExtractingDraft.value = false
+            }
+        }
+    }
+
+    fun addAdminDraftEntry(item: ScheduleItem) {
+        _adminDraftEntries.value = (_adminDraftEntries.value + item).take(150)
+    }
+
+    fun removeAdminDraftEntry(index: Int) {
+        val current = _adminDraftEntries.value
+        if (index in current.indices) {
+            _adminDraftEntries.value = current.filterIndexed { i, _ -> i != index }
+        }
+    }
+
+    fun clearAdminDraftEntries() {
+        _adminDraftEntries.value = emptyList()
+        _adminDraftError.value = null
+    }
+
+    fun clearAdminDraftError() {
+        _adminDraftError.value = null
+    }
+
+    fun publishBatchSchedule(
+        program: String,
+        department: String,
+        academicYear: Int,
+        semester: Int,
+        section: String,
+        kind: PublishedScheduleKind,
+        title: String,
+        onComplete: () -> Unit = {}
+    ) {
+        if (_publishingSchedule.value) return
+        val entries = _adminDraftEntries.value
+        if (entries.isEmpty()) {
+            _adminDraftError.value = "Upload a timetable/exam file or add at least one entry before publishing."
+            return
+        }
+        viewModelScope.launch {
+            _publishingSchedule.value = true
+            _adminDraftError.value = null
+            try {
+                val publisherName = userProfile.value?.displayName?.ifBlank { "Campus Admin" } ?: "Campus Admin"
+                val cleanSec = AcademicCatalog.normalizeSection(section)
+                repository.publishBatchSchedule(
+                    program = program,
+                    department = department,
+                    academicYear = academicYear,
+                    semester = semester,
+                    section = cleanSec,
+                    kind = kind,
+                    title = title,
+                    entries = entries,
+                    publisherName = publisherName
+                ).onSuccess {
+                    // Also post a live campus alert so students see the notification in Alerts as well
+                    val batchTag = "$department · Year $academicYear · Sec $cleanSec"
+                    repository.broadcastAnnouncement(
+                        severity = AnnouncementSeverity.INFO,
+                        title = "$batchTag ${kind.label} is Live".take(120),
+                        body = "Official ${kind.label.lowercase()} (${entries.size} entries) for $program $batchTag is now available. Open the Schedule tab to import it automatically.",
+                        department = department.take(60),
+                        authorName = publisherName
+                    )
+                    _adminDraftEntries.value = emptyList()
+                    _snackbarMessage.value = "Published ${kind.label} for $batchTag and notified students."
+                    onComplete()
+                }.onFailure { err ->
+                    _adminDraftError.value = err.localizedMessage ?: "Failed to publish batch schedule."
+                }
+            } finally {
+                _publishingSchedule.value = false
+            }
+        }
+    }
+
+    fun deletePublishedSchedule(scheduleId: String) {
+        viewModelScope.launch {
+            repository.deletePublishedSchedule(scheduleId)
+                .onSuccess { _snackbarMessage.value = "Published batch schedule removed." }
+                .onFailure { _snackbarMessage.value = it.localizedMessage ?: "Could not delete schedule." }
         }
     }
 
@@ -941,34 +1247,183 @@ class CampusBotViewModel(
         }
     }
 
-    // --- Preferences & UI Feedback ---
+    // --- Student Academic Onboarding, Preferences & UI Feedback ---
+
+    fun completeAcademicOnboarding(
+        program: String,
+        department: String,
+        semester: Int,
+        section: String,
+        rollNumber: String,
+        enrollmentNumber: String,
+        autoImportBundledSchedule: Boolean,
+        scheduleFileUri: Uri?,
+        onComplete: () -> Unit = {}
+    ) {
+        if (_savingOnboarding.value) return
+        val cleanProgram = program.trim().take(40)
+        val cleanDept = department.trim().take(80)
+        val safeSem = semester.coerceIn(1, 10)
+        val cleanSec = AcademicCatalog.normalizeSection(section).take(24)
+        val cleanRoll = rollNumber.trim().take(40)
+        val cleanEnroll = enrollmentNumber.trim().take(60)
+
+        if (cleanProgram.isEmpty() || cleanDept.isEmpty() || cleanSec.isEmpty() || cleanRoll.isEmpty() || cleanEnroll.isEmpty()) {
+            _onboardingError.value = "Please fill in all required academic details."
+            return
+        }
+
+        if (isGuestMode) {
+            _onboardingError.value = null
+            _guestProfile.value = _guestProfile.value.copy(
+                program = cleanProgram,
+                department = cleanDept,
+                semester = safeSem,
+                section = cleanSec,
+                rollNumber = cleanRoll,
+                enrollmentNumber = cleanEnroll,
+                profileCompleted = true
+            )
+            triggerPostOnboardingImports(
+                department = cleanDept,
+                semester = safeSem,
+                section = cleanSec,
+                autoImportBundledSchedule = autoImportBundledSchedule,
+                scheduleFileUri = scheduleFileUri
+            )
+            _snackbarMessage.value = "Profile saved · RAG scoped to $cleanDept Sem $safeSem (Sec $cleanSec)."
+            onComplete()
+            return
+        }
+
+        viewModelScope.launch {
+            _savingOnboarding.value = true
+            _onboardingError.value = null
+            try {
+                repository.saveAcademicOnboarding(
+                    program = cleanProgram,
+                    department = cleanDept,
+                    semester = safeSem,
+                    section = cleanSec,
+                    rollNumber = cleanRoll,
+                    enrollmentNumber = cleanEnroll
+                ).onSuccess {
+                    val base = userProfile.value ?: _fallbackProfile.value ?: UserProfile()
+                    _fallbackProfile.value = base.copy(
+                        program = cleanProgram,
+                        department = cleanDept,
+                        semester = safeSem,
+                        section = cleanSec,
+                        rollNumber = cleanRoll,
+                        enrollmentNumber = cleanEnroll,
+                        profileCompleted = true
+                    )
+                    triggerPostOnboardingImports(
+                        department = cleanDept,
+                        semester = safeSem,
+                        section = cleanSec,
+                        autoImportBundledSchedule = autoImportBundledSchedule,
+                        scheduleFileUri = scheduleFileUri
+                    )
+                    _snackbarMessage.value = "Profile saved · RAG scoped to $cleanDept Sem $safeSem (Sec $cleanSec)."
+                    onComplete()
+                }.onFailure { err ->
+                    _onboardingError.value = err.localizedMessage ?: "Failed to save academic details. Please try again."
+                }
+            } finally {
+                _savingOnboarding.value = false
+            }
+        }
+    }
+
+    private fun triggerPostOnboardingImports(
+        department: String,
+        semester: Int,
+        section: String,
+        autoImportBundledSchedule: Boolean,
+        scheduleFileUri: Uri?
+    ) {
+        if (autoImportBundledSchedule && AcademicCatalog.matchesBundledIot2B(department, semester, section)) {
+            importIot2BTimetable()
+        }
+        if (scheduleFileUri != null) {
+            importScheduleFromUri(scheduleFileUri)
+        }
+    }
+
+    fun clearOnboardingError() {
+        _onboardingError.value = null
+    }
 
     fun updateProfilePreferences(
         displayName: String,
+        program: String,
         department: String,
+        semester: Int,
+        section: String,
+        rollNumber: String,
+        enrollmentNumber: String,
         notificationsEnabled: Boolean,
         reminderLeadMinutes: Int,
         onComplete: () -> Unit = {}
     ) {
+        val cleanName = displayName.trim().ifBlank { "Student" }.take(80)
+        val cleanProgram = program.trim().take(40)
+        val cleanDept = department.trim().take(80)
+        val safeSem = semester.coerceIn(0, 10)
+        val cleanSec = AcademicCatalog.normalizeSection(section).take(24)
+        val cleanRoll = rollNumber.trim().take(40)
+        val cleanEnroll = enrollmentNumber.trim().take(60)
+        val safeLead = reminderLeadMinutes.coerceIn(5, 1440)
+        val completed = cleanProgram.isNotEmpty() &&
+            cleanDept.isNotEmpty() &&
+            safeSem > 0 &&
+            cleanSec.isNotEmpty() &&
+            cleanRoll.isNotEmpty() &&
+            cleanEnroll.isNotEmpty()
+
         if (isGuestMode) {
             _guestProfile.value = _guestProfile.value.copy(
-                displayName = displayName.trim().ifBlank { "Guest Student" }.take(80),
-                department = department.trim().take(80),
+                displayName = cleanName.ifBlank { "Guest Student" },
+                program = cleanProgram,
+                department = cleanDept,
+                semester = safeSem,
+                section = cleanSec,
+                rollNumber = cleanRoll,
+                enrollmentNumber = cleanEnroll,
+                profileCompleted = completed,
                 notificationsEnabled = notificationsEnabled,
-                reminderLeadMinutes = reminderLeadMinutes.coerceIn(5, 1440)
+                reminderLeadMinutes = safeLead
             )
-            _snackbarMessage.value = "Guest preferences saved for this session."
+            _snackbarMessage.value = "Academic profile & preferences saved for this session."
             onComplete()
             return
         }
         viewModelScope.launch {
             repository.updateUserProfile(
-                displayName = displayName,
-                department = department,
+                displayName = cleanName,
+                program = cleanProgram,
+                department = cleanDept,
+                semester = safeSem,
+                section = cleanSec,
+                rollNumber = cleanRoll,
+                enrollmentNumber = cleanEnroll,
                 notificationsEnabled = notificationsEnabled,
-                reminderLeadMinutes = reminderLeadMinutes
+                reminderLeadMinutes = safeLead
             ).onSuccess {
-                _snackbarMessage.value = "Preferences saved."
+                _fallbackProfile.value = (userProfile.value ?: _fallbackProfile.value)?.copy(
+                    displayName = cleanName,
+                    program = cleanProgram,
+                    department = cleanDept,
+                    semester = safeSem,
+                    section = cleanSec,
+                    rollNumber = cleanRoll,
+                    enrollmentNumber = cleanEnroll,
+                    profileCompleted = completed,
+                    notificationsEnabled = notificationsEnabled,
+                    reminderLeadMinutes = safeLead
+                )
+                _snackbarMessage.value = "Academic profile & preferences saved."
                 onComplete()
             }.onFailure {
                 _snackbarMessage.value = it.localizedMessage ?: "Could not save preferences."

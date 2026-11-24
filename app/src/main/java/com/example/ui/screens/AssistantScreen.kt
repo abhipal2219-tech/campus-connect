@@ -46,25 +46,26 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.unit.dp
+import com.example.data.model.AcademicCatalog
 import com.example.data.model.CampusAnnouncement
 import com.example.data.model.ChatMessage
 import com.example.data.model.ChatSender
 import com.example.data.model.ScheduleFormatter
 import com.example.data.model.ScheduleItem
 import com.example.data.model.ScheduleItemType
+import com.example.data.model.StudentAcademicScope
 import com.example.data.model.UiState
 import com.example.data.repository.CampusKnowledgeData
 import com.example.ui.components.FormattedAssistantText
-import com.example.ui.components.MonochromeBadge
 import com.example.ui.components.MonochromeCard
 import com.example.ui.components.MonochromeErrorCard
 import com.example.ui.components.MonochromeLoadingState
 
 private val StarterPrompts = listOf(
-    "What is IoT 2B's Monday schedule and room?",
+    "What is my Monday class schedule and room?",
     "Where is Buddha Auditorium and the Medical Room?",
-    "Who is the class teacher and mentors for Section A?",
-    "Which room is Dr. Srima Nandi or Dr. Arabinda Chakraborty in?"
+    "Who is my class teacher and mentors?",
+    "What pending assignments do I have on Google Classroom?"
 )
 
 @Composable
@@ -74,6 +75,7 @@ fun AssistantScreen(
     scheduleItems: List<ScheduleItem>,
     announcements: List<CampusAnnouncement>,
     directoryCount: Int,
+    studentScope: StudentAcademicScope? = null,
     isAiLoading: Boolean,
     streamingText: String?,
     aiError: String?,
@@ -84,6 +86,17 @@ fun AssistantScreen(
 ) {
     var inputText by rememberSaveable { mutableStateOf("") }
     val listState = rememberLazyListState()
+    val scopedPrompts = if (studentScope?.isConfigured == true) {
+        val cleanSec = AcademicCatalog.normalizeSection(studentScope.section)
+        listOf(
+            "What is my Monday class schedule and room?",
+            "Who is the class teacher and mentors for Section $cleanSec?",
+            "Which faculty members are in ${studentScope.department}?",
+            "What pending assignments do I have on Google Classroom?"
+        )
+    } else {
+        StarterPrompts
+    }
 
     val messages = (chatState as? UiState.Success)?.data.orEmpty()
 
@@ -99,18 +112,14 @@ fun AssistantScreen(
             .fillMaxSize()
             .imePadding()
     ) {
-        // Live grounded context status bar
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 16.dp, vertical = 8.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.SpaceBetween
-        ) {
-            MonochromeBadge(
-                text = "KB · ${knowledgeData.faculty.size} FACULTY · ${knowledgeData.rooms.size} ROOMS · ${knowledgeData.sections.size} SEC · ${announcements.size} ALERTS"
-            )
-            if (messages.isNotEmpty()) {
+        if (messages.isNotEmpty()) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp, vertical = 4.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.End
+            ) {
                 IconButton(
                     onClick = onClearChat,
                     modifier = Modifier
@@ -143,11 +152,8 @@ fun AssistantScreen(
                 is UiState.Success -> {
                     if (messages.isEmpty() && streamingText == null) {
                         AssistantEmptyCanvas(
-                            facultyCount = knowledgeData.faculty.size,
-                            roomCount = knowledgeData.rooms.size,
-                            sectionCount = knowledgeData.sections.size,
-                            iotSlotCount = knowledgeData.iot2BSlots.size,
-                            directoryCount = directoryCount,
+                            studentScope = studentScope,
+                            suggestedPrompts = scopedPrompts,
                             onPromptSelected = { prompt ->
                                 onDismissError()
                                 onSendPrompt(prompt)
@@ -184,7 +190,7 @@ fun AssistantScreen(
                 contentPadding = PaddingValues(horizontal = 16.dp, vertical = 6.dp),
                 horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
-                items(StarterPrompts.take(3)) { suggestion ->
+                items(scopedPrompts.take(3)) { suggestion ->
                     Surface(
                         onClick = {
                             onDismissError()
@@ -225,7 +231,7 @@ fun AssistantScreen(
                         .testTag("assistant_prompt_input"),
                     placeholder = {
                         Text(
-                            text = "Ask about faculty, rooms, sections, IoT 2B schedule...",
+                            text = "Ask about classes, exams, faculty, rooms, or campus...",
                             style = MaterialTheme.typography.bodyMedium
                         )
                     },
@@ -294,11 +300,8 @@ fun AssistantScreen(
 
 @Composable
 private fun AssistantEmptyCanvas(
-    facultyCount: Int,
-    roomCount: Int,
-    sectionCount: Int,
-    iotSlotCount: Int,
-    directoryCount: Int,
+    studentScope: StudentAcademicScope?,
+    suggestedPrompts: List<String>,
     onPromptSelected: (String) -> Unit,
     onNavigateToTickets: () -> Unit
 ) {
@@ -332,7 +335,12 @@ private fun AssistantEmptyCanvas(
                         )
                     }
                     Text(
-                        text = "Grounded in $facultyCount faculty profiles, $roomCount campus rooms across B1–B3, $sectionCount sections & mentors, $iotSlotCount IoT 2B timetable slots, plus your personal schedule, live alerts, and $directoryCount admin offices.",
+                        text = if (studentScope?.isConfigured == true) {
+                            val cleanSec = AcademicCatalog.normalizeSection(studentScope.section)
+                            "Personalized for ${studentScope.program} ${studentScope.department} · Year ${studentScope.academicYear} (Sem ${studentScope.semester}) · Section $cleanSec. Ask about your class & exam schedule, faculty offices, campus rooms, Classroom assignments, and live alerts."
+                        } else {
+                            "Ask about your class schedule, upcoming exams, faculty offices, campus rooms, assignments, and live campus alerts."
+                        },
                         style = MaterialTheme.typography.bodyMedium,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
@@ -349,7 +357,7 @@ private fun AssistantEmptyCanvas(
             )
         }
 
-        items(StarterPrompts) { prompt ->
+        items(suggestedPrompts) { prompt ->
             MonochromeCard(
                 onClick = { onPromptSelected(prompt) },
                 modifier = Modifier

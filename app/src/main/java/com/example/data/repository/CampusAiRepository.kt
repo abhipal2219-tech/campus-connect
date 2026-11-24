@@ -13,6 +13,7 @@ import com.example.data.model.DirectoryOffice
 import com.example.data.model.ScheduleFormatter
 import com.example.data.model.ScheduleItem
 import com.example.data.model.ScheduleItemType
+import com.example.data.model.StudentAcademicScope
 import com.google.firebase.Firebase
 import com.google.firebase.ai.GenerativeModel
 import com.google.firebase.ai.ai
@@ -164,7 +165,8 @@ class CampusAiRepository(
         scheduleItems: List<ScheduleItem>,
         announcements: List<CampusAnnouncement>,
         directory: List<DirectoryOffice>,
-        pendingAssignments: List<ClassroomAssignment> = emptyList()
+        pendingAssignments: List<ClassroomAssignment> = emptyList(),
+        studentScope: StudentAcademicScope? = null
     ): Flow<String> = flow {
         val recentUserTurns = recentHistory
             .filter { it.parsedSender == ChatSender.USER }
@@ -172,7 +174,7 @@ class CampusAiRepository(
             .map { it.content }
 
         val relevantContext = withContext(Dispatchers.Default) {
-            knowledgeBase.buildRelevantContextForQuery(userPrompt, recentUserTurns)
+            knowledgeBase.buildRelevantContextForQuery(userPrompt, recentUserTurns, studentScope)
         }
         val liveContext = buildLiveFirestoreContext(
             userPrompt = userPrompt,
@@ -187,6 +189,13 @@ class CampusAiRepository(
         }
 
         val fullPrompt = buildString {
+            if (studentScope?.isConfigured == true) {
+                appendLine(
+                    "STUDENT: ${studentScope.program} ${studentScope.department} | Sem ${studentScope.semester} (Year ${studentScope.academicYear}) | Sec ${studentScope.section}" +
+                        (if (studentScope.rollNumber.isNotBlank()) " | Roll ${studentScope.rollNumber}" else "") +
+                        (if (studentScope.enrollmentNumber.isNotBlank()) " | Enr ${studentScope.enrollmentNumber}" else "")
+                )
+            }
             appendLine(relevantContext)
             if (liveContext.isNotBlank()) {
                 appendLine()

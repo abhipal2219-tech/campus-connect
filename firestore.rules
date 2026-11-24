@@ -48,6 +48,12 @@ service cloud.firestore {
              data.displayName is string && data.displayName.size() >= 1 && data.displayName.size() <= 80 &&
              data.email is string && data.email.size() <= 120 &&
              data.department is string && data.department.size() <= 80 &&
+             (!('program' in data) || (data.program is string && data.program.size() <= 40)) &&
+             (!('semester' in data) || (data.semester is int && data.semester >= 0 && data.semester <= 10)) &&
+             (!('section' in data) || (data.section is string && data.section.size() <= 24)) &&
+             (!('rollNumber' in data) || (data.rollNumber is string && data.rollNumber.size() <= 40)) &&
+             (!('enrollmentNumber' in data) || (data.enrollmentNumber is string && data.enrollmentNumber.size() <= 60)) &&
+             (!('profileCompleted' in data) || data.profileCompleted is bool) &&
              data.notificationsEnabled is bool &&
              data.reminderLeadMinutes is int && data.reminderLeadMinutes >= 5 && data.reminderLeadMinutes <= 1440;
     }
@@ -115,6 +121,21 @@ service cloud.firestore {
              data.authorName is string && data.authorName.size() >= 1 && data.authorName.size() <= 80;
     }
 
+    function isValidPublishedSchedule(data) {
+      return data.visibility is string && data.visibility == 'campus' &&
+             data.program is string && data.program.size() >= 1 && data.program.size() <= 40 &&
+             data.department is string && data.department.size() >= 1 && data.department.size() <= 80 &&
+             data.academicYear is int && data.academicYear >= 1 && data.academicYear <= 5 &&
+             data.semester is int && data.semester >= 0 && data.semester <= 10 &&
+             data.section is string && data.section.size() >= 1 && data.section.size() <= 24 &&
+             data.scheduleKind is string && data.scheduleKind in ['CLASS', 'EXAM', 'BOTH'] &&
+             data.title is string && data.title.size() >= 2 && data.title.size() <= 120 &&
+             data.entriesJson is string && data.entriesJson.size() >= 2 && data.entriesJson.size() <= 120000 &&
+             data.entryCount is int && data.entryCount >= 1 && data.entryCount <= 150 &&
+             data.publishedByUid is string && data.publishedByUid.size() >= 1 && data.publishedByUid.size() <= 128 &&
+             data.publishedByName is string && data.publishedByName.size() >= 1 && data.publishedByName.size() <= 80;
+    }
+
     // --- Collection Rules ---
 
     // 1. User Profiles (Strict PII isolation: owner or admin get only; no blanket list)
@@ -127,7 +148,7 @@ service cloud.firestore {
                        request.auth.uid == userId &&
                        incoming().userId == request.auth.uid &&
                        incoming().keys().hasAll(['userId', 'displayName', 'email', 'department', 'notificationsEnabled', 'reminderLeadMinutes', 'createdAt', 'updatedAt']) &&
-                       incoming().keys().hasOnly(['userId', 'displayName', 'email', 'department', 'notificationsEnabled', 'reminderLeadMinutes', 'createdAt', 'updatedAt']) &&
+                       incoming().keys().hasOnly(['userId', 'displayName', 'email', 'program', 'department', 'semester', 'section', 'rollNumber', 'enrollmentNumber', 'profileCompleted', 'notificationsEnabled', 'reminderLeadMinutes', 'createdAt', 'updatedAt']) &&
                        isValidUserProfile(incoming()) &&
                        isValidTimestamp(incoming().createdAt) &&
                        isValidTimestamp(incoming().updatedAt);
@@ -139,7 +160,7 @@ service cloud.firestore {
                        incoming().userId == existing().userId &&
                        incoming().createdAt == existing().createdAt &&
                        isValidTimestamp(incoming().updatedAt) &&
-                       incoming().diff(existing()).affectedKeys().hasOnly(['displayName', 'email', 'department', 'notificationsEnabled', 'reminderLeadMinutes', 'updatedAt']);
+                       incoming().diff(existing()).affectedKeys().hasOnly(['displayName', 'email', 'program', 'department', 'semester', 'section', 'rollNumber', 'enrollmentNumber', 'profileCompleted', 'notificationsEnabled', 'reminderLeadMinutes', 'updatedAt']);
 
       allow delete: if isSignedIn() && isValidId(userId) && (request.auth.uid == userId || isAdmin());
 
@@ -299,6 +320,34 @@ service cloud.firestore {
                        isAdmin();
 
       allow delete: if isSignedIn() && isValidId(announcementId) && isAdmin();
+    }
+
+    // 8. Admin-Published Batch Class & Exam Schedules (Authenticated students read visibility == 'campus'; Admin-only writes)
+    match /publishedSchedules/{scheduleId} {
+      allow get: if isSignedIn() && isValidId(scheduleId) && (existing().visibility == 'campus' || isAdmin());
+      allow list: if isSignedIn() && resource.data.visibility == 'campus';
+
+      allow create: if isSignedIn() &&
+                       isValidId(scheduleId) &&
+                       incoming().publishedByUid == request.auth.uid &&
+                       incoming().keys().hasAll(['visibility', 'program', 'department', 'academicYear', 'semester', 'section', 'scheduleKind', 'title', 'entriesJson', 'entryCount', 'publishedByUid', 'publishedByName', 'createdAt', 'updatedAt']) &&
+                       incoming().keys().hasOnly(['visibility', 'program', 'department', 'academicYear', 'semester', 'section', 'scheduleKind', 'title', 'entriesJson', 'entryCount', 'publishedByUid', 'publishedByName', 'createdAt', 'updatedAt']) &&
+                       isValidPublishedSchedule(incoming()) &&
+                       isValidTimestamp(incoming().createdAt) &&
+                       isValidTimestamp(incoming().updatedAt) &&
+                       isAdmin();
+
+      allow update: if isSignedIn() &&
+                       isValidId(scheduleId) &&
+                       isValidPublishedSchedule(incoming()) &&
+                       incoming().visibility == existing().visibility &&
+                       incoming().createdAt == existing().createdAt &&
+                       incoming().publishedByUid == request.auth.uid &&
+                       isValidTimestamp(incoming().updatedAt) &&
+                       incoming().diff(existing()).affectedKeys().hasOnly(['program', 'department', 'academicYear', 'semester', 'section', 'scheduleKind', 'title', 'entriesJson', 'entryCount', 'publishedByUid', 'publishedByName', 'updatedAt']) &&
+                       isAdmin();
+
+      allow delete: if isSignedIn() && isValidId(scheduleId) && isAdmin();
     }
   }
 }

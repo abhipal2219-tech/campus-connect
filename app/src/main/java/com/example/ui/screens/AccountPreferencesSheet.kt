@@ -11,13 +11,18 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.ExposedDropdownMenuBox
+import androidx.compose.material3.ExposedDropdownMenuDefaults
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.MenuAnchorType
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
@@ -34,7 +39,9 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.text.input.KeyboardCapitalization
 import androidx.compose.ui.unit.dp
+import com.example.data.model.AcademicCatalog
 import com.example.data.model.ScheduleFormatter
 import com.example.data.model.UserProfile
 import com.example.ui.components.MonochromeBadge
@@ -49,7 +56,18 @@ fun AccountPreferencesSheet(
     isAdmin: Boolean,
     isGuestMode: Boolean = false,
     onDismiss: () -> Unit,
-    onSavePreferences: (String, String, Boolean, Int, () -> Unit) -> Unit,
+    onSavePreferences: (
+        displayName: String,
+        program: String,
+        department: String,
+        semester: Int,
+        section: String,
+        rollNumber: String,
+        enrollmentNumber: String,
+        notificationsEnabled: Boolean,
+        reminderLeadMinutes: Int,
+        onComplete: () -> Unit
+    ) -> Unit,
     onSignOut: () -> Unit,
     onSignInWithGoogle: () -> Unit = {}
 ) {
@@ -57,8 +75,33 @@ fun AccountPreferencesSheet(
     var displayName by remember(profile?.displayName) {
         mutableStateOf(profile?.displayName.orEmpty())
     }
-    var department by remember(profile?.department) {
-        mutableStateOf(profile?.department.orEmpty())
+    var selectedProgram by remember(profile?.program) {
+        val existing = profile?.program.orEmpty()
+        mutableStateOf(
+            AcademicCatalog.programs.firstOrNull { it.name.equals(existing, ignoreCase = true) }?.name
+                ?: AcademicCatalog.programs.first().name
+        )
+    }
+    var selectedDepartment by remember(profile?.department, selectedProgram) {
+        val depts = AcademicCatalog.departmentsFor(selectedProgram)
+        val existing = profile?.department.orEmpty()
+        mutableStateOf(
+            depts.firstOrNull { it.equals(existing, ignoreCase = true) } ?: depts.first()
+        )
+    }
+    var departmentExpanded by remember { mutableStateOf(false) }
+
+    var semester by remember(profile?.semester) {
+        mutableIntStateOf((profile?.semester ?: 1).coerceAtLeast(1))
+    }
+    var section by remember(profile?.section) {
+        mutableStateOf(profile?.section.orEmpty())
+    }
+    var rollNumber by remember(profile?.rollNumber) {
+        mutableStateOf(profile?.rollNumber.orEmpty())
+    }
+    var enrollmentNumber by remember(profile?.enrollmentNumber) {
+        mutableStateOf(profile?.enrollmentNumber.orEmpty())
     }
     var notificationsEnabled by remember(profile?.notificationsEnabled) {
         mutableStateOf(profile?.notificationsEnabled ?: true)
@@ -66,6 +109,14 @@ fun AccountPreferencesSheet(
     var leadMinutes by remember(profile?.reminderLeadMinutes) {
         mutableIntStateOf(profile?.reminderLeadMinutes ?: 30)
     }
+
+    val availableDepartments = remember(selectedProgram) {
+        AcademicCatalog.departmentsFor(selectedProgram)
+    }
+    val availableSemesters = remember(selectedProgram) {
+        AcademicCatalog.semestersFor(selectedProgram)
+    }
+    val derivedYear = AcademicCatalog.yearFromSemester(semester)
 
     ModalBottomSheet(
         onDismissRequest = onDismiss,
@@ -84,7 +135,7 @@ fun AccountPreferencesSheet(
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                Text("Account & Alerts", style = MaterialTheme.typography.headlineSmall)
+                Text("Academic Profile & Alerts", style = MaterialTheme.typography.headlineSmall)
                 MonochromeBadge(
                     text = when {
                         isGuestMode -> "GUEST"
@@ -116,7 +167,7 @@ fun AccountPreferencesSheet(
                     )
                     Text(
                         text = if (isGuestMode) {
-                            "AI assistant, campus JSON directory, and local reminders are active. Sign in with Google to sync across devices."
+                            "Scoped RAG, campus directory, and local reminders are active. Sign in with Google to sync across devices."
                         } else {
                             "UID: $uid"
                         },
@@ -134,13 +185,114 @@ fun AccountPreferencesSheet(
                 modifier = Modifier.fillMaxWidth()
             )
 
+            Text("Program", style = MaterialTheme.typography.labelMedium)
+            LazyRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                items(AcademicCatalog.programs, key = { it.name }) { prog ->
+                    FilterChip(
+                        selected = selectedProgram == prog.name,
+                        onClick = {
+                            selectedProgram = prog.name
+                            if (selectedDepartment !in prog.departments) {
+                                selectedDepartment = prog.departments.first()
+                            }
+                            if (semester > prog.maxSemesters) {
+                                semester = prog.maxSemesters
+                            }
+                        },
+                        label = { Text(prog.name) }
+                    )
+                }
+            }
+
+            ExposedDropdownMenuBox(
+                expanded = departmentExpanded,
+                onExpandedChange = { departmentExpanded = !departmentExpanded }
+            ) {
+                OutlinedTextField(
+                    value = selectedDepartment,
+                    onValueChange = {},
+                    readOnly = true,
+                    label = { Text("Department") },
+                    trailingIcon = {
+                        ExposedDropdownMenuDefaults.TrailingIcon(expanded = departmentExpanded)
+                    },
+                    modifier = Modifier
+                        .menuAnchor(MenuAnchorType.PrimaryNotEditable)
+                        .fillMaxWidth()
+                        .testTag("pref_department_dropdown")
+                )
+                ExposedDropdownMenu(
+                    expanded = departmentExpanded,
+                    onDismissRequest = { departmentExpanded = false }
+                ) {
+                    availableDepartments.forEach { dept ->
+                        DropdownMenuItem(
+                            text = { Text(dept) },
+                            onClick = {
+                                selectedDepartment = dept
+                                departmentExpanded = false
+                            }
+                        )
+                    }
+                }
+            }
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text("Semester", style = MaterialTheme.typography.labelMedium)
+                MonochromeBadge(text = "YEAR $derivedYear · SEM $semester")
+            }
+            LazyRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                items(availableSemesters) { sem ->
+                    FilterChip(
+                        selected = semester == sem,
+                        onClick = { semester = sem },
+                        label = { Text("Sem $sem") }
+                    )
+                }
+            }
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                OutlinedTextField(
+                    value = section,
+                    onValueChange = { section = it.uppercase().take(24) },
+                    label = { Text("Section") },
+                    singleLine = true,
+                    keyboardOptions = KeyboardOptions(
+                        capitalization = KeyboardCapitalization.Characters
+                    ),
+                    modifier = Modifier
+                        .weight(0.4f)
+                        .testTag("pref_section_input")
+                )
+                OutlinedTextField(
+                    value = rollNumber,
+                    onValueChange = { rollNumber = it.take(40) },
+                    label = { Text("Roll No.") },
+                    singleLine = true,
+                    modifier = Modifier
+                        .weight(0.6f)
+                        .testTag("pref_roll_input")
+                )
+            }
+
             OutlinedTextField(
-                value = department,
-                onValueChange = { department = it.take(80) },
-                label = { Text("Department / Major") },
+                value = enrollmentNumber,
+                onValueChange = { enrollmentNumber = it.take(60) },
+                label = { Text("Enrollment Number") },
                 singleLine = true,
-                modifier = Modifier.fillMaxWidth()
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .testTag("pref_enrollment_input")
             )
+
+            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
 
             Row(
                 modifier = Modifier.fillMaxWidth(),
@@ -175,8 +327,18 @@ fun AccountPreferencesSheet(
 
             Button(
                 onClick = {
-                    if (displayName.isNotBlank()) {
-                        onSavePreferences(displayName, department, notificationsEnabled, leadMinutes) {
+                    if (displayName.isNotBlank() && section.isNotBlank() && rollNumber.isNotBlank() && enrollmentNumber.isNotBlank()) {
+                        onSavePreferences(
+                            displayName,
+                            selectedProgram,
+                            selectedDepartment,
+                            semester,
+                            section,
+                            rollNumber,
+                            enrollmentNumber,
+                            notificationsEnabled,
+                            leadMinutes
+                        ) {
                             onDismiss()
                         }
                     }
@@ -186,7 +348,7 @@ fun AccountPreferencesSheet(
                     .height(48.dp)
                     .testTag("save_preferences_button")
             ) {
-                Text("Save Preferences")
+                Text("Save Profile & Preferences")
             }
 
             HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)

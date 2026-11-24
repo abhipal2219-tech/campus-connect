@@ -18,9 +18,33 @@
           "format": "email",
           "description": "User Google account email address."
         },
+        "program": {
+          "type": "string",
+          "description": "Degree program such as B.Tech., M.Tech., B.B.A., M.B.A., B.C.A., M.C.A., B.Sc., or B.B.A-L.L.B."
+        },
         "department": {
           "type": "string",
           "description": "Academic major or campus department."
+        },
+        "semester": {
+          "type": "integer",
+          "description": "Current semester number (1-10) used to derive academic year and scope RAG chunking."
+        },
+        "section": {
+          "type": "string",
+          "description": "Class section identifier (e.g., A, B, 2B) used to scope RAG chunking and schedule imports."
+        },
+        "rollNumber": {
+          "type": "string",
+          "description": "Student class roll number."
+        },
+        "enrollmentNumber": {
+          "type": "string",
+          "description": "University enrollment number."
+        },
+        "profileCompleted": {
+          "type": "boolean",
+          "description": "Whether the student completed the initial academic onboarding form."
         },
         "notificationsEnabled": {
           "type": "boolean",
@@ -383,6 +407,89 @@
         "authorName",
         "createdAt"
       ]
+    },
+    "PublishedSchedule": {
+      "title": "PublishedSchedule",
+      "description": "Official class or exam schedule published by Campus Admins for a specific program, department, academic year, and section.",
+      "type": "object",
+      "properties": {
+        "visibility": {
+          "type": "string",
+          "enum": ["campus"],
+          "description": "Visibility scope required for authenticated student schedule queries."
+        },
+        "program": {
+          "type": "string",
+          "description": "Degree program such as B.Tech., M.Tech., B.B.A., M.B.A., B.C.A., M.C.A., B.Sc., or B.B.A-L.L.B."
+        },
+        "department": {
+          "type": "string",
+          "description": "Target academic branch or department."
+        },
+        "academicYear": {
+          "type": "integer",
+          "description": "Target academic year (1 to 5)."
+        },
+        "semester": {
+          "type": "integer",
+          "description": "Optional target semester (0 for all semesters in the year, or 1 to 10)."
+        },
+        "section": {
+          "type": "string",
+          "description": "Target class section letter (e.g., A, B, C)."
+        },
+        "scheduleKind": {
+          "type": "string",
+          "enum": ["CLASS", "EXAM", "BOTH"],
+          "description": "Whether this published package contains class timetable entries, exam routine entries, or both."
+        },
+        "title": {
+          "type": "string",
+          "description": "Human-readable schedule headline."
+        },
+        "entriesJson": {
+          "type": "string",
+          "description": "Serialized JSON array of schedule entries ready for one-tap student import."
+        },
+        "entryCount": {
+          "type": "integer",
+          "description": "Total number of class and exam entries in entriesJson."
+        },
+        "publishedByUid": {
+          "type": "string",
+          "description": "Firebase Auth UID of the publishing Campus Admin."
+        },
+        "publishedByName": {
+          "type": "string",
+          "description": "Display name of the publishing Campus Admin."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp written via FieldValue.serverTimestamp()."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp written via FieldValue.serverTimestamp()."
+        }
+      },
+      "required": [
+        "visibility",
+        "program",
+        "department",
+        "academicYear",
+        "semester",
+        "section",
+        "scheduleKind",
+        "title",
+        "entriesJson",
+        "entryCount",
+        "publishedByUid",
+        "publishedByName",
+        "createdAt",
+        "updatedAt"
+      ]
     }
   },
   "firestore": {
@@ -413,6 +520,10 @@
     "/announcements/{announcementId}": {
       "schema": { "$ref": "#/entities/CampusAnnouncement" },
       "description": "Live campus announcements and urgent alerts broadcast by Campus Admins."
+    },
+    "/publishedSchedules/{scheduleId}": {
+      "schema": { "$ref": "#/entities/PublishedSchedule" },
+      "description": "Admin-published class and exam schedules scoped by program, department, academic year, and section."
     }
   }
 }

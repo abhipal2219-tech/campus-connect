@@ -226,7 +226,7 @@ fun AuthScreen(
                         CapabilityRow(
                             icon = Icons.Outlined.CalendarMonth,
                             title = "Class & Exam Reminders",
-                            subtitle = "Import IoT 2B timetable and schedule push reminders."
+                            subtitle = "Import your batch timetable or exam routine with push reminders."
                         )
                         HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
                         CapabilityRow(

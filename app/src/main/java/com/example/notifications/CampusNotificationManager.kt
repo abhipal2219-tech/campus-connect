@@ -17,6 +17,7 @@ import com.example.MainActivity
 import com.example.R
 import com.example.data.model.AnnouncementSeverity
 import com.example.data.model.CampusAnnouncement
+import com.example.data.model.PublishedSchedule
 import com.example.data.model.ScheduleFormatter
 import com.example.data.model.ScheduleItem
 import com.example.data.model.ScheduleItemType
@@ -152,6 +153,44 @@ object CampusNotificationManager {
             NotificationManagerCompat.from(context).notify(notificationId, notification)
         } catch (e: SecurityException) {
             Log.w(TAG, "Notification permission denied while posting schedule reminder", e)
+        }
+    }
+
+    fun showSchedulePublishedNotification(context: Context, schedule: PublishedSchedule) {
+        if (!hasNotificationPermission(context)) {
+            Log.d(TAG, "Skipping schedule live notification: POST_NOTIFICATIONS not granted.")
+            return
+        }
+        ensureChannels(context)
+
+        val openIntent = Intent(context, MainActivity::class.java).apply {
+            flags = Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
+        }
+        val notifId = ("published_schedule_${schedule.id}").hashCode()
+        val pendingIntent = PendingIntent.getActivity(
+            context,
+            notifId,
+            openIntent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+
+        val title = "Your ${schedule.parsedKind.label} is Live"
+        val body = "${schedule.batchLabel} (${schedule.entryCount} entries) is ready to import in CampusBot."
+
+        val notification = NotificationCompat.Builder(context, CHANNEL_SCHEDULE_REMINDERS)
+            .setSmallIcon(R.mipmap.ic_launcher)
+            .setContentTitle(title)
+            .setContentText(body)
+            .setStyle(NotificationCompat.BigTextStyle().bigText(body))
+            .setPriority(NotificationCompat.PRIORITY_HIGH)
+            .setAutoCancel(true)
+            .setContentIntent(pendingIntent)
+            .build()
+
+        try {
+            NotificationManagerCompat.from(context).notify(notifId, notification)
+        } catch (e: SecurityException) {
+            Log.w(TAG, "Notification permission denied while posting published schedule alert", e)
         }
     }
 
