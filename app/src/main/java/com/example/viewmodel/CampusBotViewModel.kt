@@ -1,6 +1,9 @@
 package com.example.viewmodel
 
+import android.app.Activity
+import android.app.PendingIntent
 import android.content.Context
+import android.content.Intent
 import android.net.Uri
 import android.util.Log
 import androidx.lifecycle.ViewModel
@@ -11,6 +14,8 @@ import com.example.data.model.AnnouncementSeverity
 import com.example.data.model.CampusAnnouncement
 import com.example.data.model.ChatMessage
 import com.example.data.model.ChatSender
+import com.example.data.model.ClassroomAssignment
+import com.example.data.model.ClassroomUiState
 import com.example.data.model.DirectoryOffice
 import com.example.data.model.HelpdeskTicket
 import com.example.data.model.ScheduleFormatter
@@ -25,6 +30,8 @@ import com.example.data.repository.CampusAiRepository
 import com.example.data.repository.CampusKnowledgeBase
 import com.example.data.repository.CampusKnowledgeData
 import com.example.data.repository.CampusRepository
+import com.example.data.repository.ClassroomAuthException
+import com.example.data.repository.GoogleClassroomRepository
 import com.example.notifications.CampusNotificationManager
 import com.google.firebase.Timestamp
 import com.google.firebase.firestore.FirebaseFirestoreException
@@ -46,6 +53,7 @@ import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import java.util.Calendar
 import java.util.UUID
 
 private const val VM_TAG = "CampusBotViewModel"
@@ -56,7 +64,8 @@ class CampusBotViewModel(
     private val repository: CampusRepository,
     private val knowledgeBase: CampusKnowledgeBase,
     private val isGuestMode: Boolean = false,
-    private val aiRepository: CampusAiRepository = CampusAiRepository(knowledgeBase)
+    private val aiRepository: CampusAiRepository = CampusAiRepository(knowledgeBase),
+    private val classroomRepository: GoogleClassroomRepository = GoogleClassroomRepository(appContext)
 ) : ViewModel() {
 
     private val _knowledgeData = MutableStateFlow(CampusKnowledgeData())
@@ -191,6 +200,10 @@ class CampusBotViewModel(
     private val _lastImportSummary = MutableStateFlow<String?>(null)
     val lastImportSummary: StateFlow<String?> = _lastImportSummary.asStateFlow()
 
+    private val _classroomState = MutableStateFlow<ClassroomUiState>(ClassroomUiState.Disconnected)
+    val classroomState: StateFlow<ClassroomUiState> = _classroomState.asStateFlow()
+    private var cachedClassroomAccessToken: String? = null
+
     private val seenAnnouncementIds = mutableSetOf<String>()
     private var announcementsBaselineLoaded = false
     private var directorySeedAttempted = false
@@ -292,13 +305,15 @@ class CampusBotViewModel(
             }
 
             var finalReply = ""
+            val pendingAssignments = (_classroomState.value as? ClassroomUiState.Connected)?.assignments.orEmpty()
             try {
                 aiRepository.streamCampusReply(
                     userPrompt = prompt,
                     recentHistory = history,
                     scheduleItems = schedule,
                     announcements = alerts,
-                    directory = offices
+                    directory = offices,
+                    pendingAssignments = pendingAssignments
                 ).collect { partial ->
                     finalReply = partial
                     _aiStreamingText.value = partial
@@ -624,6 +639,167 @@ class CampusBotViewModel(
 
     fun dismissImportSummary() {
         _lastImportSummary.value = null
+    }
+
+    // --- Google Classroom Pending Assignments Actions ---
+
+    fun connectGoogleClassroom(onResolutionRequired: (PendingIntent) -> Unit) {
+        if (_classroomState.value is ClassroomUiState.Loading) return
+        viewModelScope.launch {
+            _classroomState.value = ClassroomUiState.Loading
+            try {
+                val result = classroomRepository.authorizeClassroomAccess()
+                val resolution = result.pendingIntent
+                if (result.hasResolution() && resolution != null) {
+                    onResolutionRequired(resolution)
+                    return@launch
+                }
+                val token = result.accessToken
+                if (token.isNullOrBlank()) {
+                    _classroomState.value = ClassroomUiState.Error(
+                        message = "Google did not return a Classroom access token. Please try connecting again.",
+                        needsReconnect = true
+                    )
+                    return@launch
+                }
+                cachedClassroomAccessToken = token
+                syncClassroomWithToken(token)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                Log.e(VM_TAG, "Google Classroom authorization failed", e)
+                _classroomState.value = ClassroomUiState.Error(
+                    message = e.localizedMessage ?: "Could not connect to Google Classroom.",
+                    needsReconnect = true
+                )
+            }
+        }
+    }
+
+    fun handleClassroomAuthResult(resultCode: Int, data: Intent?) {
+        if (resultCode != Activity.RESULT_OK || data == null) {
+            _classroomState.value = ClassroomUiState.Disconnected
+            _snackbarMessage.value = "Google Classroom sign-in was cancelled."
+            return
+        }
+        viewModelScope.launch {
+            _classroomState.value = ClassroomUiState.Loading
+            try {
+                val authResult = classroomRepository.extractAuthorizationResult(data)
+                val token = authResult.accessToken
+                if (token.isNullOrBlank()) {
+                    _classroomState.value = ClassroomUiState.Error(
+                        message = "Unable to obtain Classroom authorization token. Please try again.",
+                        needsReconnect = true
+                    )
+                    return@launch
+                }
+                cachedClassroomAccessToken = token
+                syncClassroomWithToken(token)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                Log.e(VM_TAG, "Failed extracting Classroom OAuth result", e)
+                _classroomState.value = ClassroomUiState.Error(
+                    message = e.localizedMessage ?: "Google Classroom permission could not be verified.",
+                    needsReconnect = true
+                )
+            }
+        }
+    }
+
+    fun refreshClassroomAssignments(onResolutionRequired: (PendingIntent) -> Unit) {
+        val token = cachedClassroomAccessToken
+        if (token.isNullOrBlank()) {
+            connectGoogleClassroom(onResolutionRequired)
+            return
+        }
+        viewModelScope.launch {
+            _classroomState.value = ClassroomUiState.Loading
+            syncClassroomWithToken(token)
+        }
+    }
+
+    fun disconnectClassroom() {
+        cachedClassroomAccessToken = null
+        _classroomState.value = ClassroomUiState.Disconnected
+        _snackbarMessage.value = "Disconnected Google Classroom."
+    }
+
+    fun addAssignmentAsReminder(assignment: ClassroomAssignment) {
+        val leadMinutes = userProfile.value?.reminderLeadMinutes ?: 60
+        val dueMillis = assignment.dueEpochMillis ?: Calendar.getInstance().apply {
+            add(Calendar.DAY_OF_YEAR, 1)
+            set(Calendar.HOUR_OF_DAY, 18)
+            set(Calendar.MINUTE, 0)
+            set(Calendar.SECOND, 0)
+            set(Calendar.MILLISECOND, 0)
+        }.timeInMillis
+
+        val cal = Calendar.getInstance().apply { timeInMillis = dueMillis }
+        val dayNum = when (cal.get(Calendar.DAY_OF_WEEK)) {
+            Calendar.MONDAY -> 1
+            Calendar.TUESDAY -> 2
+            Calendar.WEDNESDAY -> 3
+            Calendar.THURSDAY -> 4
+            Calendar.FRIDAY -> 5
+            Calendar.SATURDAY -> 6
+            else -> 7
+        }
+        val startMin = (cal.get(Calendar.HOUR_OF_DAY) * 60 + cal.get(Calendar.MINUTE)).coerceIn(0, 1400)
+        val shortCourseCode = assignment.courseName
+            .split(Regex("\\s+"))
+            .filter { it.isNotBlank() }
+            .take(4)
+            .joinToString("") { it.first().uppercaseChar().toString() }
+            .ifBlank { "CR" }
+            .take(16)
+
+        val item = ScheduleItem(
+            itemType = ScheduleItemType.EXAM.name,
+            courseCode = "HW-$shortCourseCode".take(24),
+            title = assignment.title.take(100),
+            dayOfWeek = dayNum,
+            startTimeMinutes = startMin,
+            endTimeMinutes = (startMin + 30).coerceAtMost(1439),
+            examEpochMillis = dueMillis,
+            location = "Google Classroom · ${assignment.courseName}".take(100),
+            instructor = assignment.courseSection.take(80),
+            reminderEnabled = true,
+            reminderLeadMinutes = leadMinutes.coerceIn(5, 1440)
+        )
+        saveScheduleItem(item)
+    }
+
+    private suspend fun syncClassroomWithToken(accessToken: String) {
+        try {
+            val result = classroomRepository.fetchPendingAssignments(accessToken)
+            _classroomState.value = ClassroomUiState.Connected(
+                assignments = result.assignments,
+                activeCourseCount = result.activeCourseCount,
+                lastSyncedMillis = result.syncedAtMillis
+            )
+            _snackbarMessage.value = if (result.assignments.isEmpty()) {
+                "Synced ${result.activeCourseCount} courses — no pending assignments."
+            } else {
+                "Loaded ${result.assignments.size} pending ${if (result.assignments.size == 1) "assignment" else "assignments"} from Classroom."
+            }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: ClassroomAuthException) {
+            Log.w(VM_TAG, "Classroom auth error: ${e.message}")
+            cachedClassroomAccessToken = null
+            _classroomState.value = ClassroomUiState.Error(
+                message = e.message ?: "Google Classroom authorization expired.",
+                needsReconnect = e.needsReconnect
+            )
+        } catch (e: Exception) {
+            Log.e(VM_TAG, "Classroom sync failed", e)
+            _classroomState.value = ClassroomUiState.Error(
+                message = e.localizedMessage ?: "Failed to load pending assignments from Google Classroom.",
+                needsReconnect = false
+            )
+        }
     }
 
     // --- Helpdesk Ticket Actions ---

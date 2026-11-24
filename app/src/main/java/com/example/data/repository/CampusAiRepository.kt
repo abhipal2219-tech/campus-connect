@@ -8,6 +8,7 @@ import android.util.Log
 import com.example.data.model.CampusAnnouncement
 import com.example.data.model.ChatMessage
 import com.example.data.model.ChatSender
+import com.example.data.model.ClassroomAssignment
 import com.example.data.model.DirectoryOffice
 import com.example.data.model.ScheduleFormatter
 import com.example.data.model.ScheduleItem
@@ -36,9 +37,9 @@ import java.util.Date
 import java.util.Locale
 
 private const val AI_TAG = "CampusAiRepository"
-private const val FAST_CHAT_MODEL = "gemini-3.5-flash-lite"
-private const val PRIMARY_MODEL = "gemini-3.8-flash"
-private const val FALLBACK_MODEL = "gemini-3.5-flash-lite"
+// Primary high-throughput free-tier Gemini 3.5 Flash-Lite model with automatic Gemini 3.8 Flash fallback
+private const val FREE_TIER_FLASH_MODEL = "gemini-3.5-flash-lite"
+private const val FALLBACK_FLASH_MODEL = "gemini-3.8-flash"
 private const val MAX_INLINE_BYTES = 18 * 1024 * 1024 // Keep safely under 20MB inline limit
 private const val MAX_RAW_IMAGE_BYTES = 10 * 1024 * 1024 // Send crisp untouched JPEG/PNG/WebP directly up to 10MB
 private const val MAX_SCALED_IMAGE_DIM = 3072
@@ -51,15 +52,12 @@ class CampusAiRepository(
         content {
             text(
                 """
-                You are CampusBot, a polished, concise campus assistant grounded on official university campus data (faculty, rooms across B1-B3, sections/teachers/mentors, IoT 2B timetable) plus the student's schedule, exams, alerts, and offices.
-                Style & Formatting Rules:
-                - Write in a clear, professional, easy-to-scan tone.
-                - Use clean short section titles (e.g., "Monday Schedule — IoT 2B") and simple "Label: Value" lines (e.g., "Room: B3 LG 4.6", "Email: name@campus.edu") whenever giving details about a person, room, or section.
-                - For multi-item schedules or lists, use numbered lines (1., 2., 3.) or a single clean flat list with em-dashes/pipes (e.g., "09:30–10:15 · Technical Skill Development · Room B3 LG 4.6 (MNC)").
-                - NEVER clutter replies with nested bullets, double symbols ("* -"), repeated dashes ("---"), or excessive asterisks ("**"). Keep formatting minimal and refined.
-                - Answer directly with exact room codes, blocks/floors, faculty names/codes/cabins, section teacher phones/emails, mentors, and class times from the provided context.
-                - If a faculty room is blank, state clearly that it is not listed in the campus directory.
-                - Never fabricate rooms, emails, phones, or schedules not present in the context.
+                You are CampusBot, a polished, concise campus assistant grounded on official university data (faculty, B1-B3 rooms, sections/mentors, IoT 2B timetable) plus the student's schedule, exams, alerts, and offices.
+                Style Rules:
+                - Write clearly and professionally. Use short section titles and "Label: Value" lines for rooms, faculty, or contacts.
+                - For schedules or lists, use clean numbered lines (1., 2., 3.) with "·" separators (e.g. "09:30–10:15 · Technical Skill Development · Room B3 LG 4.6 (MNC)").
+                - Avoid nested bullets, repeated dashes, or raw asterisk clutter.
+                - Use exact room codes, blocks, floors, phones, emails, and times from the context. Never invent missing details.
                 """.trimIndent()
             )
         }
@@ -68,13 +66,13 @@ class CampusAiRepository(
     private val chatGenerationConfig by lazy {
         generationConfig {
             temperature = 0.2f
-            maxOutputTokens = 700
+            maxOutputTokens = 550
         }
     }
 
     private val primaryChatModel by lazy {
         Firebase.ai.generativeModel(
-            modelName = FAST_CHAT_MODEL,
+            modelName = FREE_TIER_FLASH_MODEL,
             generationConfig = chatGenerationConfig,
             systemInstruction = chatSystemInstruction
         )
@@ -82,7 +80,7 @@ class CampusAiRepository(
 
     private val fallbackChatModel by lazy {
         Firebase.ai.generativeModel(
-            modelName = PRIMARY_MODEL,
+            modelName = FALLBACK_FLASH_MODEL,
             generationConfig = chatGenerationConfig,
             systemInstruction = chatSystemInstruction
         )
@@ -148,14 +146,14 @@ class CampusAiRepository(
 
     private val primaryExtractionModel by lazy {
         Firebase.ai.generativeModel(
-            modelName = PRIMARY_MODEL,
+            modelName = FREE_TIER_FLASH_MODEL,
             generationConfig = scheduleExtractionConfig
         )
     }
 
     private val fallbackExtractionModel by lazy {
         Firebase.ai.generativeModel(
-            modelName = FALLBACK_MODEL,
+            modelName = FALLBACK_FLASH_MODEL,
             generationConfig = scheduleExtractionConfig
         )
     }
@@ -165,36 +163,47 @@ class CampusAiRepository(
         recentHistory: List<ChatMessage>,
         scheduleItems: List<ScheduleItem>,
         announcements: List<CampusAnnouncement>,
-        directory: List<DirectoryOffice>
+        directory: List<DirectoryOffice>,
+        pendingAssignments: List<ClassroomAssignment> = emptyList()
     ): Flow<String> = flow {
+        val recentUserTurns = recentHistory
+            .filter { it.parsedSender == ChatSender.USER }
+            .takeLast(2)
+            .map { it.content }
+
         val relevantContext = withContext(Dispatchers.Default) {
-            knowledgeBase.buildRelevantContextForQuery(userPrompt)
+            knowledgeBase.buildRelevantContextForQuery(userPrompt, recentUserTurns)
         }
-        val liveContext = buildLiveFirestoreContext(scheduleItems, announcements, directory)
-        val historyText = recentHistory.takeLast(4).joinToString("\n") { msg ->
-            val role = if (msg.parsedSender == ChatSender.USER) "Student" else "CampusBot"
-            "$role: ${msg.content.take(240)}"
+        val liveContext = buildLiveFirestoreContext(
+            userPrompt = userPrompt,
+            scheduleItems = scheduleItems,
+            announcements = announcements,
+            directory = directory,
+            pendingAssignments = pendingAssignments
+        )
+        val historyText = recentHistory.takeLast(3).joinToString("\n") { msg ->
+            val role = if (msg.parsedSender == ChatSender.USER) "U" else "A"
+            "$role: ${msg.content.replace("\n", " ").take(160)}"
         }
 
         val fullPrompt = buildString {
             appendLine(relevantContext)
             if (liveContext.isNotBlank()) {
                 appendLine()
-                appendLine("=== USER SCHEDULE & ALERTS ===")
+                appendLine("USER DATA:")
                 appendLine(liveContext)
             }
             if (historyText.isNotBlank()) {
-                appendLine("\n=== RECENT CHAT ===")
+                appendLine("\nCHAT:")
                 appendLine(historyText)
             }
-            appendLine("\n=== QUESTION ===")
-            appendLine(userPrompt.trim())
+            appendLine("\nQ: ${userPrompt.trim()}")
         }
 
         val candidates: List<Pair<String, GenerativeModel>> = listOf(
-            FAST_CHAT_MODEL to primaryChatModel,
-            PRIMARY_MODEL to fallbackChatModel,
-            "$FAST_CHAT_MODEL (retry)" to primaryChatModel
+            FREE_TIER_FLASH_MODEL to primaryChatModel,
+            FALLBACK_FLASH_MODEL to fallbackChatModel,
+            "$FREE_TIER_FLASH_MODEL (retry)" to primaryChatModel
         )
 
         var lastError: Throwable? = null
@@ -275,9 +284,9 @@ class CampusAiRepository(
         }
 
         val candidates: List<Pair<String, GenerativeModel>> = listOf(
-            PRIMARY_MODEL to primaryExtractionModel,
-            FALLBACK_MODEL to fallbackExtractionModel,
-            "$PRIMARY_MODEL (retry)" to primaryExtractionModel
+            FREE_TIER_FLASH_MODEL to primaryExtractionModel,
+            FALLBACK_FLASH_MODEL to fallbackExtractionModel,
+            "$FREE_TIER_FLASH_MODEL (retry)" to primaryExtractionModel
         )
 
         var lastError: Throwable? = null
@@ -678,53 +687,113 @@ class CampusAiRepository(
     }
 
     private fun buildLiveFirestoreContext(
+        userPrompt: String,
         scheduleItems: List<ScheduleItem>,
         announcements: List<CampusAnnouncement>,
-        directory: List<DirectoryOffice>
+        directory: List<DirectoryOffice>,
+        pendingAssignments: List<ClassroomAssignment>
     ): String {
+        val q = userPrompt.trim().lowercase()
+        val mentionedDay = knowledgeBase.detectDayName(q)
+        val wantsSchedule = mentionedDay != null || listOf(
+            "my", "schedule", "class", "timetable", "next", "today", "tomorrow", "period", "lab", "reminder"
+        ).any { q.contains(it) }
+        val wantsExams = listOf(
+            "exam", "midterm", "final", "quiz", "test", "deadline", "upcoming", "schedule", "today", "tomorrow", "next"
+        ).any { q.contains(it) }
+        val wantsAssignments = listOf(
+            "assignment", "homework", "pending", "classroom", "submit", "submission", "due", "overdue", "task", "deadline", "today", "tomorrow"
+        ).any { q.contains(it) }
+        val wantsAlerts = listOf(
+            "alert", "notice", "announcement", "update", "news", "holiday", "urgent", "today", "campus"
+        ).any { q.contains(it) }
+        val wantsDirectory = listOf(
+            "office", "admin", "registrar", "fee", "finance", "admission", "helpdesk", "phone", "hours", "contact", "where"
+        ).any { q.contains(it) }
+
         val classes = scheduleItems.filter { it.parsedType == ScheduleItemType.CLASS }
         val exams = scheduleItems.filter { it.parsedType == ScheduleItemType.EXAM }
             .sortedBy { it.examEpochMillis }
-        if (classes.isEmpty() && exams.isEmpty() && announcements.isEmpty() && directory.isEmpty()) {
+
+        val selectedClasses = if (wantsSchedule && classes.isNotEmpty()) {
+            val dayFiltered = if (mentionedDay != null) {
+                classes.filter { ScheduleFormatter.dayFull(it.dayOfWeek).equals(mentionedDay, ignoreCase = true) }
+            } else {
+                emptyList()
+            }
+            (if (dayFiltered.isNotEmpty()) dayFiltered else classes)
+                .sortedWith(compareBy<ScheduleItem> { it.dayOfWeek }.thenBy { it.startTimeMinutes })
+                .take(12)
+        } else {
+            emptyList()
+        }
+
+        val selectedExams = if (wantsExams && exams.isNotEmpty()) exams.take(8) else emptyList()
+        val selectedAssignments = if (wantsAssignments && pendingAssignments.isNotEmpty()) {
+            pendingAssignments.take(10)
+        } else {
+            emptyList()
+        }
+
+        val selectedAlerts = if (wantsAlerts && announcements.isNotEmpty()) {
+            announcements.take(4)
+        } else {
+            // Surface only high-severity urgent alerts passively (at most 1)
+            announcements.filter { it.severity.equals("URGENT", ignoreCase = true) }.take(1)
+        }
+
+        val selectedOffices = if (wantsDirectory && directory.isNotEmpty()) {
+            val qTokens = q.split(Regex("[^a-z0-9]+")).filter { it.length >= 3 }
+            val matched = directory.filter { d ->
+                val hay = "${d.name} ${d.building} ${d.room} ${d.description}".lowercase()
+                qTokens.any { hay.contains(it) }
+            }
+            (if (matched.isNotEmpty()) matched else directory).take(6)
+        } else {
+            emptyList()
+        }
+
+        if (selectedClasses.isEmpty() && selectedExams.isEmpty() && selectedAssignments.isEmpty() && selectedAlerts.isEmpty() && selectedOffices.isEmpty()) {
             return ""
         }
 
         return buildString {
-            if (classes.isNotEmpty()) {
-                appendLine("Saved Classes (${classes.size}):")
-                classes.take(20).forEach { c ->
+            if (selectedAssignments.isNotEmpty()) {
+                appendLine("PendingClassroomAssignments(${pendingAssignments.size}):")
+                selectedAssignments.forEach { a ->
+                    appendLine("${a.courseName} | ${a.title} | ${a.formattedDueLabel()} (${a.statusLabel})")
+                }
+            }
+            if (selectedClasses.isNotEmpty()) {
+                appendLine("SavedClasses:")
+                selectedClasses.forEach { c ->
                     appendLine(
-                        "- ${c.courseCode} ${c.title}: ${ScheduleFormatter.dayShort(c.dayOfWeek)} " +
-                            "${ScheduleFormatter.formatMinutes(c.startTimeMinutes)}-${ScheduleFormatter.formatMinutes(c.endTimeMinutes)}" +
+                        "${ScheduleFormatter.dayShort(c.dayOfWeek)} ${ScheduleFormatter.formatMinutes(c.startTimeMinutes)}-${ScheduleFormatter.formatMinutes(c.endTimeMinutes)} | ${c.title}" +
                             (if (c.location.isNotBlank()) " @ ${c.location}" else "") +
                             (if (c.instructor.isNotBlank()) " (${c.instructor})" else "")
                     )
                 }
             }
-
-            if (exams.isNotEmpty()) {
-                appendLine("Upcoming Exams (${exams.size}):")
-                exams.take(10).forEach { ex ->
+            if (selectedExams.isNotEmpty()) {
+                appendLine("Exams:")
+                selectedExams.forEach { ex ->
                     appendLine(
-                        "- ${ex.courseCode} ${ex.title}: ${ScheduleFormatter.formatExamDate(ex.examEpochMillis)} " +
-                            "(${ScheduleFormatter.countdownLabel(ex.examEpochMillis)})" +
+                        "${ex.courseCode} ${ex.title} | ${ScheduleFormatter.formatExamDate(ex.examEpochMillis)} (${ScheduleFormatter.countdownLabel(ex.examEpochMillis)})" +
                             (if (ex.location.isNotBlank()) " @ ${ex.location}" else "")
                     )
                 }
             }
-
-            if (announcements.isNotEmpty()) {
-                appendLine("Live Alerts (${announcements.size}):")
-                announcements.take(6).forEach { a ->
-                    appendLine("- [${a.severity}] ${a.title} (${a.department}): ${a.body.take(180)}")
+            if (selectedAlerts.isNotEmpty()) {
+                appendLine("Alerts:")
+                selectedAlerts.forEach { a ->
+                    appendLine("[${a.severity}] ${a.title} (${a.department}): ${a.body.take(120)}")
                 }
             }
-
-            if (directory.isNotEmpty()) {
-                appendLine("Admin Offices (${directory.size}):")
-                directory.take(10).forEach { d ->
+            if (selectedOffices.isNotEmpty()) {
+                appendLine("Offices:")
+                selectedOffices.forEach { d ->
                     appendLine(
-                        "- ${d.name}: ${d.building} ${d.room} | ${d.hours}" +
+                        "${d.name}: ${d.building} ${d.room} | ${d.hours}" +
                             (if (d.phone.isNotBlank()) " | ${d.phone}" else "")
                     )
                 }

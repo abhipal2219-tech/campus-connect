@@ -198,6 +198,7 @@ private fun CampusBotShell(
     val isExtractingSchedule by vm.extractingSchedule.collectAsStateWithLifecycle()
     val extractionError by vm.extractionError.collectAsStateWithLifecycle()
     val lastImportSummary by vm.lastImportSummary.collectAsStateWithLifecycle()
+    val classroomState by vm.classroomState.collectAsStateWithLifecycle()
 
     val tabs = remember(isAdmin) {
         if (isAdmin) CampusTab.entries else CampusTab.entries.filter { it != CampusTab.ADMIN }
@@ -419,6 +420,7 @@ private fun CampusBotShell(
 
                                 CampusTab.SCHEDULE -> ScheduleScreen(
                                     scheduleState = scheduleState,
+                                    classroomState = classroomState,
                                     defaultLeadMinutes = userProfile?.reminderLeadMinutes ?: 30,
                                     iotSlotCount = knowledgeData.iot2BSlots.size,
                                     isImportingTimetable = isImportingTimetable,
@@ -429,6 +431,11 @@ private fun CampusBotShell(
                                     onImportScheduleFile = vm::importScheduleFromUri,
                                     onDismissExtractionError = vm::clearExtractionError,
                                     onDismissImportSummary = vm::dismissImportSummary,
+                                    onConnectClassroom = vm::connectGoogleClassroom,
+                                    onHandleClassroomAuthResult = vm::handleClassroomAuthResult,
+                                    onRefreshClassroom = vm::refreshClassroomAssignments,
+                                    onDisconnectClassroom = vm::disconnectClassroom,
+                                    onAddAssignmentReminder = vm::addAssignmentAsReminder,
                                     onSaveItem = vm::saveScheduleItem,
                                     onToggleReminder = vm::toggleScheduleReminder,
                                     onDeleteItem = vm::deleteScheduleItem,

@@ -1,7 +1,10 @@
 package com.example.ui.screens
 
+import android.app.PendingIntent
+import android.content.Intent
 import android.net.Uri
 import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.IntentSenderRequest
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.BorderStroke
@@ -70,6 +73,8 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.unit.dp
+import com.example.data.model.ClassroomAssignment
+import com.example.data.model.ClassroomUiState
 import com.example.data.model.ScheduleFormatter
 import com.example.data.model.ScheduleItem
 import com.example.data.model.ScheduleItemType
@@ -80,6 +85,7 @@ import com.example.ui.components.MonochromeEmptyState
 import com.example.ui.components.MonochromeErrorCard
 import com.example.ui.components.MonochromeLoadingState
 import com.example.ui.components.SegmentedMonochromeTabs
+import com.example.ui.components.classroomAssignmentsItems
 import java.util.Calendar
 
 private val LeadTimeOptions = listOf(15, 30, 60, 180, 1440)
@@ -89,6 +95,7 @@ private val StartHourOptions = listOf(8, 9, 10, 11, 13, 14, 15, 16, 18)
 @Composable
 fun ScheduleScreen(
     scheduleState: UiState<List<ScheduleItem>>,
+    classroomState: ClassroomUiState,
     defaultLeadMinutes: Int,
     iotSlotCount: Int,
     isImportingTimetable: Boolean,
@@ -99,13 +106,19 @@ fun ScheduleScreen(
     onImportScheduleFile: (Uri) -> Unit,
     onDismissExtractionError: () -> Unit,
     onDismissImportSummary: () -> Unit,
+    onConnectClassroom: ((PendingIntent) -> Unit) -> Unit,
+    onHandleClassroomAuthResult: (Int, Intent?) -> Unit,
+    onRefreshClassroom: ((PendingIntent) -> Unit) -> Unit,
+    onDisconnectClassroom: () -> Unit,
+    onAddAssignmentReminder: (ClassroomAssignment) -> Unit,
     onSaveItem: (ScheduleItem, () -> Unit) -> Unit,
     onToggleReminder: (ScheduleItem) -> Unit,
     onDeleteItem: (ScheduleItem) -> Unit,
     onPreviewReminder: (ScheduleItem) -> Unit
 ) {
-    var selectedSegment by rememberSaveable { mutableIntStateOf(0) } // 0 = Classes, 1 = Exams
+    var selectedSegment by rememberSaveable { mutableIntStateOf(0) } // 0 = Classes, 1 = Exams, 2 = Assignments
     var selectedDay by rememberSaveable { mutableIntStateOf(ScheduleFormatter.todayDayOfWeek()) }
+    var classroomFilter by rememberSaveable { mutableStateOf("ALL") }
     var editingItem by remember { mutableStateOf<ScheduleItem?>(null) }
     var showSheet by remember { mutableStateOf(false) }
 
@@ -125,6 +138,19 @@ fun ScheduleScreen(
         if (uri != null) {
             onImportScheduleFile(uri)
         }
+    }
+
+    // Google Identity AuthorizationClient OAuth consent resolution launcher
+    val classroomAuthLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.StartIntentSenderForResult()
+    ) { activityResult ->
+        onHandleClassroomAuthResult(activityResult.resultCode, activityResult.data)
+    }
+
+    val launchClassroomResolution: (PendingIntent) -> Unit = { pendingIntent ->
+        classroomAuthLauncher.launch(
+            IntentSenderRequest.Builder(pendingIntent.intentSender).build()
+        )
     }
 
     // Automatically focus an imported day or the Exams tab right after auto-extraction completes
@@ -181,29 +207,33 @@ fun ScheduleScreen(
                         )
                     }
 
-                    // Auto-Extract Schedule from PDF or Image Card
-                    item {
-                        ScheduleDocumentScanCard(
-                            isExtracting = isExtractingSchedule,
-                            extractionError = extractionError,
-                            lastImportSummary = lastImportSummary,
-                            onPickImage = {
-                                imagePickerLauncher.launch(
-                                    PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
-                                )
-                            },
-                            onPickPdf = {
-                                pdfPickerLauncher.launch(arrayOf("application/pdf", "image/*"))
-                            },
-                            onDismissError = onDismissExtractionError,
-                            onDismissSummary = onDismissImportSummary
-                        )
+                    // Auto-Extract Schedule from PDF or Image Card (shown on Classes & Exams tabs)
+                    if (selectedSegment != 2) {
+                        item {
+                            ScheduleDocumentScanCard(
+                                isExtracting = isExtractingSchedule,
+                                extractionError = extractionError,
+                                lastImportSummary = lastImportSummary,
+                                onPickImage = {
+                                    imagePickerLauncher.launch(
+                                        PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
+                                    )
+                                },
+                                onPickPdf = {
+                                    pdfPickerLauncher.launch(arrayOf("application/pdf", "image/*"))
+                                },
+                                onDismissError = onDismissExtractionError,
+                                onDismissSummary = onDismissImportSummary
+                            )
+                        }
                     }
 
-                    // Segmented Classes / Exams Switcher
+                    // Segmented Classes / Exams / Assignments Switcher
                     item {
+                        val pendingCount = (classroomState as? ClassroomUiState.Connected)?.assignments?.size ?: 0
+                        val assignmentsLabel = if (pendingCount > 0) "Assignments ($pendingCount)" else "Assignments"
                         SegmentedMonochromeTabs(
-                            options = listOf("Classes", "Exams & Deadlines"),
+                            options = listOf("Classes", "Exams", assignmentsLabel),
                             selectedIndex = selectedSegment,
                             onSelected = { selectedSegment = it },
                             tagPrefix = "schedule_segment"
@@ -318,7 +348,7 @@ fun ScheduleScreen(
                                 )
                             }
                         }
-                    } else {
+                    } else if (selectedSegment == 1) {
                         if (examsSorted.isEmpty()) {
                             item {
                                 MonochromeEmptyState(
@@ -356,36 +386,51 @@ fun ScheduleScreen(
                                 )
                             }
                         }
+                    } else {
+                        classroomAssignmentsItems(
+                            classroomState = classroomState,
+                            selectedFilter = classroomFilter,
+                            onSelectFilter = { classroomFilter = it },
+                            onConnectClassroom = { onConnectClassroom(launchClassroomResolution) },
+                            onRefreshClassroom = { onRefreshClassroom(launchClassroomResolution) },
+                            onDisconnectClassroom = {
+                                classroomFilter = "ALL"
+                                onDisconnectClassroom()
+                            },
+                            onAddAssignmentReminder = onAddAssignmentReminder
+                        )
                     }
                 }
             }
         }
 
-        FloatingActionButton(
-            onClick = {
-                val isExamTab = selectedSegment == 1
-                val defaultExamMillis = Calendar.getInstance().apply {
-                    add(Calendar.DAY_OF_YEAR, 3)
-                    set(Calendar.HOUR_OF_DAY, 10)
-                    set(Calendar.MINUTE, 0)
-                }.timeInMillis
-                editingItem = ScheduleItem(
-                    itemType = if (isExamTab) ScheduleItemType.EXAM.name else ScheduleItemType.CLASS.name,
-                    dayOfWeek = selectedDay,
-                    examEpochMillis = if (isExamTab) defaultExamMillis else 0L,
-                    reminderLeadMinutes = defaultLeadMinutes
-                )
-                showSheet = true
-            },
-            containerColor = MaterialTheme.colorScheme.primary,
-            contentColor = MaterialTheme.colorScheme.onPrimary,
-            shape = RoundedCornerShape(14.dp),
-            modifier = Modifier
-                .align(Alignment.BottomEnd)
-                .padding(16.dp)
-                .testTag("add_schedule_fab")
-        ) {
-            Icon(imageVector = Icons.Rounded.Add, contentDescription = "Add class or exam")
+        if (selectedSegment != 2) {
+            FloatingActionButton(
+                onClick = {
+                    val isExamTab = selectedSegment == 1
+                    val defaultExamMillis = Calendar.getInstance().apply {
+                        add(Calendar.DAY_OF_YEAR, 3)
+                        set(Calendar.HOUR_OF_DAY, 10)
+                        set(Calendar.MINUTE, 0)
+                    }.timeInMillis
+                    editingItem = ScheduleItem(
+                        itemType = if (isExamTab) ScheduleItemType.EXAM.name else ScheduleItemType.CLASS.name,
+                        dayOfWeek = selectedDay,
+                        examEpochMillis = if (isExamTab) defaultExamMillis else 0L,
+                        reminderLeadMinutes = defaultLeadMinutes
+                    )
+                    showSheet = true
+                },
+                containerColor = MaterialTheme.colorScheme.primary,
+                contentColor = MaterialTheme.colorScheme.onPrimary,
+                shape = RoundedCornerShape(14.dp),
+                modifier = Modifier
+                    .align(Alignment.BottomEnd)
+                    .padding(16.dp)
+                    .testTag("add_schedule_fab")
+            ) {
+                Icon(imageVector = Icons.Rounded.Add, contentDescription = "Add class or exam")
+            }
         }
     }
 
